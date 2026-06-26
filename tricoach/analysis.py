@@ -9,6 +9,7 @@ import sqlite3
 
 import pandas as pd
 
+from tricoach.formatting import derive_speed_ms
 from tricoach.storage import load_records
 from tricoach.zones import ZONE_NAMES, intensity_category
 
@@ -162,7 +163,13 @@ def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.D
             (lengths["total_timer_time"] + lengths["total_strokes"]).mean()
             if not lengths.empty else None
         )
-        speed = act["avg_speed_ms"]
+        # Tempo uit afstand en de zuivere zwemtijd (som van de actieve banen),
+        # niet uit avg_speed_ms: dat veld ontbreekt op sommige sessies (bijv.
+        # een samengevoegde zwemsessie) waardoor die anders uit de grafiek viel.
+        # Geen baandata -> terugval op de totale timer-duur.
+        actief_s = lengths["total_timer_time"].sum() if not lengths.empty else None
+        zwemtijd = actief_s if actief_s and actief_s > 0 else act["duration_s"]
+        speed = derive_speed_ms(act["distance_m"], zwemtijd)
         rows.append({
             "start_time": act["start_time"],
             "swolf": swolf,

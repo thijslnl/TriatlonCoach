@@ -31,6 +31,7 @@ from tricoach.config import load_config, resolve_path
 from tricoach.feedback import generate_feedback
 from tricoach.formatting import (
     GEEN_WAARDE,
+    derive_speed_ms,
     fmt_duration,
     sessie_tempo,
     sport_label,
@@ -526,7 +527,21 @@ with tab_trends:
         "lopen en fietsen liggen te ver uiteen voor één gedeelde as. Elke stip is "
         "één sessie; grotere stippen duurden langer."
     )
-    sc = acts.dropna(subset=["avg_speed_ms", "avg_hr"]).copy()
+    # Effectieve snelheid: avg_speed_ms waar aanwezig, anders afgeleid uit
+    # afstand en duur (voor zwemmen de zuivere zwemtijd). Zo valt een sessie
+    # zonder avg_speed_ms — zoals een samengevoegde zwemsessie — niet meer uit
+    # de grafiek.
+    zwem_actief = swim_active_seconds(conn)
+
+    def _eff_speed(r):
+        if pd.notna(r["avg_speed_ms"]) and r["avg_speed_ms"] > 0:
+            return r["avg_speed_ms"]
+        tijd = zwem_actief.get(r["activity_key"]) if r["sport"] == "swimming" else None
+        return derive_speed_ms(r["distance_m"], tijd or r["duration_s"])
+
+    sc = acts.copy()
+    sc["eff_speed_ms"] = sc.apply(_eff_speed, axis=1)
+    sc = sc.dropna(subset=["eff_speed_ms", "avg_hr"]).copy()
     sc["Datum"] = sc["start_time"].dt.strftime("%d-%m-%Y")
 
     # Per sport de natuurlijke prestatiemaat: lopen min/km, fietsen km/h,
@@ -546,10 +561,10 @@ with tab_trends:
                 continue
             deel = deel.copy()
             if soort == "tempo":
-                deel["y"] = pace_as_time(afstand / deel["avg_speed_ms"])
+                deel["y"] = pace_as_time(afstand / deel["eff_speed_ms"])
                 y_label = "Tempo (min/km)" if sport_key == "running" else "Tempo (min/100m)"
             else:
-                deel["y"] = deel["avg_speed_ms"] * 3.6
+                deel["y"] = deel["eff_speed_ms"] * 3.6
                 y_label = "Snelheid (km/h)"
             fig = px.scatter(
                 deel, x="avg_hr", y="y", size="duration_s", custom_data=["Datum"],
