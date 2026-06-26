@@ -673,7 +673,7 @@ with tab_voortgang:
     st.divider()
     # -- Racevoorspelling -----------------------------------------------------
     st.subheader("🏁 Racevoorspelling — standaard (1,5 km / 40 km / 10 km)")
-    pred = race_prediction(acts)
+    pred = race_prediction(conn, acts)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Zwemmen 1,5 km", fmt_duration(pred["zwem_1500"]))
     c2.metric("Fietsen 40 km", fmt_duration(pred["fiets_40k"]))

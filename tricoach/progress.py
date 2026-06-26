@@ -20,7 +20,24 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
+from tricoach.formatting import derive_speed_ms
 from tricoach.storage import load_records
+
+
+def swim_speed_ms(conn: sqlite3.Connection, act: pd.Series) -> float | None:
+    """Gemiddelde zwemsnelheid (m/s) uit afstand en de zuivere zwemtijd.
+
+    De zwemtijd is de som van de actieve banen (``lengths.total_timer_time``),
+    dus zonder rust aan de kant; ontbreekt baandata, dan geldt de totale
+    timer-duur. Leunt bewust niet op ``avg_speed_ms``, dat op sommige sessies
+    (zoals een samengevoegde zwemsessie) ontbreekt. None bij onbruikbare data.
+    """
+    lengths = pd.read_sql_query(
+        "SELECT total_timer_time FROM lengths WHERE activity_key = ?",
+        conn, params=(act["activity_key"],))
+    actief = lengths["total_timer_time"].sum() if not lengths.empty else None
+    zwemtijd = actief if actief and actief > 0 else act["duration_s"]
+    return derive_speed_ms(act["distance_m"], zwemtijd)
 
 # Gewicht per hartslagzone voor de TRIMP-score (minuten × gewicht).
 TRIMP_WEIGHTS = {"z1_s": 1, "z2_s": 2, "z3_s": 3, "z4_s": 4, "z5_s": 5}
@@ -135,13 +152,14 @@ def decoupling(conn: sqlite3.Connection, acts: pd.DataFrame,
 
 # ------------------------------------------------------ racevoorspelling --
 
-def race_prediction(acts: pd.DataFrame) -> dict:
+def race_prediction(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict:
     """Ruwe voorspelling van de standaard/olympische racetijden (1,5 / 40 / 10 km).
 
     Geeft per onderdeel seconden (of None bij te weinig data) plus een
     totaal inclusief een wisselbuffer. Bewust simpel gehouden: lopen via
     Riegel-schaling vanaf de beste recente loop, fietsen en zwemmen via
-    het recente sessiegemiddelde.
+    het recente sessiegemiddelde. De zwemsnelheid komt uit afstand en zwemtijd
+    (zie :func:`swim_speed_ms`), niet uit het soms ontbrekende avg_speed_ms.
     """
     pred: dict[str, float | None] = {"zwem_1500": None, "fiets_40k": None, "loop_10k": None}
 
@@ -158,11 +176,13 @@ def race_prediction(acts: pd.DataFrame) -> dict:
         snelste = rides["avg_speed_ms"].max()
         pred["fiets_40k"] = 40000 / snelste
 
-    swims = acts[acts["sport"] == "swimming"].dropna(subset=["avg_speed_ms"])
+    swims = acts[acts["sport"] == "swimming"]
     if not swims.empty:
         # Meest recente sessie: het zwemniveau verandert nu het snelst.
         recent = swims.sort_values("start_time").iloc[-1]
-        pred["zwem_1500"] = 1500 / recent["avg_speed_ms"]
+        speed = swim_speed_ms(conn, recent)
+        if speed:
+            pred["zwem_1500"] = 1500 / speed
 
     pred["wissels"] = 5 * 60  # ruwe buffer voor T1 + T2 (iets ruimer op olympische afstand)
     delen = [pred["zwem_1500"], pred["fiets_40k"], pred["loop_10k"]]
@@ -258,10 +278,13 @@ def personal_records(conn: sqlite3.Connection, acts: pd.DataFrame) -> pd.DataFra
     if not swims.empty:
         langste = swims.loc[swims["distance_m"].idxmax()]
         voeg_toe("Langste zwemsessie", f"{langste['distance_m']:.0f} m", langste["start_time"])
-        met_tempo = swims.dropna(subset=["avg_speed_ms"])
-        if not met_tempo.empty:
-            snelste = met_tempo.loc[met_tempo["avg_speed_ms"].idxmax()]
-            sec = 100 / snelste["avg_speed_ms"]
+        # Tempo uit afstand en zwemtijd, zodat ook sessies zonder avg_speed_ms
+        # meetellen; snelste = hoogste afgeleide snelheid.
+        met_tempo = [(swim_speed_ms(conn, act), act) for _, act in swims.iterrows()]
+        met_tempo = [(sp, act) for sp, act in met_tempo if sp]
+        if met_tempo:
+            snelste_speed, snelste = max(met_tempo, key=lambda p: p[0])
+            sec = 100 / snelste_speed
             voeg_toe("Snelste 100 m (sessiegemiddelde)",
                      f"{int(sec // 60)}:{int(sec % 60):02d} /100m", snelste["start_time"])
 
