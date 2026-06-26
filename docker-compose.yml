@@ -1,0 +1,23 @@
+# Triatlon Coach op Unraid (of elke Docker-host).
+#
+# Build één keer:   docker compose up -d --build
+# Daarna volstaat een herstart na codewijzigingen niet eens altijd: de app
+# herlaadt dankzij runOnSave automatisch. Alleen na het wijzigen van
+# requirements.txt opnieuw bouwen met --build.
+
+services:
+  triatlon-coach:
+    build: .
+    image: triatlon-coach:latest
+    container_name: triatlon-coach
+    ports:
+      - "8501:8501"
+    volumes:
+      # De hele projectmap van schijf in de container. Edits op schijf zijn
+      # meteen actief; de database (data/) en memory/ blijven dus ook gewoon op
+      # de host staan en overleven een container-herstart.
+      - .:/app
+    env_file:
+      # Bevat ANTHROPIC_API_KEY (wordt door de app via python-dotenv geladen).
+      - .env
+    restart: unless-stopped

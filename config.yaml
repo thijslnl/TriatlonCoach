@@ -1,0 +1,63 @@
+# =========================================================
+# Triatlon Coach - configuratie
+# Wijzigingen hier worden bij de eerstvolgende start opgepikt.
+# =========================================================
+
+athlete:
+  name: Thijs
+  max_hr: 193
+  lthr: 171          # Lactate Threshold Heart Rate (Garmin auto-detectie)
+  # Zones worden afgeleid van de LTHR: ondergrens van Z2 t/m Z5 als %LTHR.
+  # Bij LTHR 171: Z2 vanaf 137, Z3 vanaf 152, Z4 vanaf 162, Z5 vanaf 171.
+  zone_pct_lthr:
+    - 0.80
+    - 0.89
+    - 0.95
+    - 1.00
+  # Profielwaarden die als context voor advies en feedback dienen. Worden ook
+  # leesbaar gespiegeld naar memory/doelen.md (met changelog bij wijziging).
+  training_days: Zwemmen ma/vr-ochtend, optioneel vr-avond, lange duurtraining zondag
+  session_time: 30-45 min doordeweeks, 1,5-2 uur op zondag
+
+races:
+  - name: Standaard triatlon
+    date: 2027-05-01      # mei 2027, exacte datum nog in te vullen
+    distances: 1,5km zwemmen / 40km fietsen / 10km lopen
+    goal: Goed finishen (eerste race)
+    target_time: ""       # geen streeftijd (eerste race, goed finishen)
+
+llm:
+  ollama:
+    host: http://192.168.50.120:11434
+    model: gemma4:12b     # geverifieerd via /api/tags op de server
+    timeout_s: 120
+  anthropic:
+    model: claude-sonnet-4-6    # standaardmodel voor anthropic-taken
+    max_tokens: 2000
+    # API-prijzen in USD per miljoen tokens (fallback voor het verbruiksoverzicht).
+    cost_per_mtok_input_usd: 3.0
+    cost_per_mtok_output_usd: 15.0
+    # Per-taak modeloverride: een taak die naar anthropic gaat mag een eigen
+    # (goedkoper/sneller) model krijgen. Zo blijft de feedback op Haiku terwijl
+    # advies/inzichten op Sonnet draaien — handig om mee te experimenteren.
+    task_models:
+      feedback: claude-haiku-4-5-20251001
+    # Prijs per model (USD per miljoen tokens) voor een correct kostenoverzicht;
+    # onbekende modellen vallen terug op cost_per_mtok_*_usd hierboven.
+    model_prices:
+      claude-sonnet-4-6: {input: 3.0, output: 15.0}
+      claude-haiku-4-5-20251001: {input: 1.0, output: 5.0}
+  # Welk model welke taak doet. Geldige waarden: ollama | anthropic
+  routing:
+    session_summary: ollama     # logregels voor trainingslog.md
+    qa_simple: ollama           # eerste-lijns vragen in de chat
+    qa_complex: anthropic       # escalatie vanuit de chat
+    advice: anthropic           # trainingsadvies volgende sessie(s)
+    trends: anthropic           # meerweekse trendanalyse / inzichten
+    feedback: anthropic         # korte coaching-feedback direct na een upload
+    body_trend: ollama          # neutrale duiding van de lichaamssamenstelling-trend
+
+paths:
+  database: data/training.db
+  memory_dir: memory
+  import_dir: garmin_import

@@ -1,0 +1,16 @@
+# Secrets en API-sleutels
+.env
+
+# Persoonlijke data (trainingen, gezondheid, geheugen)
+data/
+memory/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store

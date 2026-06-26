@@ -1,0 +1,10 @@
+# Houdt de build-context klein. De code wordt toch via bind-mount geladen, dus
+# alleen requirements.txt hoeft echt mee voor de build.
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.git/
+data/*.db
+garmin_import/
+*.zip
