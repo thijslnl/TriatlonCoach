@@ -13,6 +13,7 @@ from datetime import date, timedelta
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import dotenv
 
@@ -596,20 +597,31 @@ with tab_voortgang:
               help="Verhouding vermoeidheid/fitheid (ACWR). 0,8–1,3 is een gezonde opbouw; "
                    "daarboven stijgt de belasting sneller dan je fitheid aankan.")
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=curves["datum"], y=curves["trimp"], name="Dagbelasting (TRIMP)",
-        marker_color="rgba(120,120,140,0.45)",
-        hovertemplate="%{x|%d-%m-%Y}: %{y:.0f} TRIMP<extra></extra>"))
+    # Twee panelen met gedeelde datum-as: één zware sessie (TRIMP in de
+    # honderden) drukt anders de CTL/ATL-lijnen (tientallen) plat tegen de
+    # nullijn, waardoor je een 'snelle stijging' niet terugziet in de grafiek.
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.6, 0.4], vertical_spacing=0.06)
     fig.add_trace(go.Scatter(
         x=curves["datum"], y=curves["ctl"], name="Fitheid (CTL)",
         line=dict(color="#54a24b", width=3),
-        hovertemplate="%{x|%d-%m-%Y}: fitheid %{y:.1f}<extra></extra>"))
+        hovertemplate="%{x|%d-%m-%Y}: fitheid %{y:.1f}<extra></extra>"),
+        row=1, col=1)
     fig.add_trace(go.Scatter(
         x=curves["datum"], y=curves["atl"], name="Vermoeidheid (ATL)",
-        line=dict(color="#f58518", width=2, dash="dot"),
-        hovertemplate="%{x|%d-%m-%Y}: vermoeidheid %{y:.1f}<extra></extra>"))
-    fig.update_layout(yaxis_title="Belasting", xaxis_title="Datum")
+        line=dict(color="#d97706", width=2, dash="dot"),
+        hovertemplate="%{x|%d-%m-%Y}: vermoeidheid %{y:.1f}<extra></extra>"),
+        row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=curves["datum"], y=curves["trimp"], name="Dagbelasting (TRIMP)",
+        marker_color="rgba(120,120,140,0.45)",
+        hovertemplate="%{x|%d-%m-%Y}: %{y:.0f} TRIMP<extra></extra>"),
+        row=2, col=1)
+    fig.update_yaxes(title_text="Fitheid & vermoeidheid", rangemode="tozero",
+                     row=1, col=1)
+    fig.update_yaxes(title_text="Dag-TRIMP", row=2, col=1)
+    fig.update_xaxes(title_text="Datum", row=2, col=1)
+    fig.update_layout(height=520, hovermode="x unified")
     st.plotly_chart(style_fig(fig), width="stretch")
     st.caption(
         "Elke sessie krijgt een TRIMP-score uit de tijd per hartslagzone "
