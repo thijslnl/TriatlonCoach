@@ -47,9 +47,14 @@ class LLMRouter:
         else:
             cfg = self.config["anthropic"]
             model = self._anthropic_model(task)
+            # Per-taak max_tokens-override: modellen met adaptief denken
+            # (Sonnet 5) besteden een deel van het budget aan denkwerk, dus
+            # de feedback-taak krijgt ruimer plafond dan de rest.
+            max_tokens = cfg.get("task_max_tokens", {}).get(
+                task, cfg.get("max_tokens", 2000))
             reply = anthropic_client.chat(
                 model=model, prompt=prompt, system=system,
-                max_tokens=cfg.get("max_tokens", 2000),
+                max_tokens=max_tokens,
             )
 
         log_call(

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS activities (
     wind_speed     REAL,
     wind_direction REAL,
     wind_gusts     REAL,
+    temperature_c  REAL,
     summary_json  TEXT,
     source_file   TEXT,
     imported_at   TEXT
@@ -93,6 +94,8 @@ _ADDED_COLUMNS = {
     "wind_speed": "REAL",
     "wind_direction": "REAL",
     "wind_gusts": "REAL",
+    # Temperatuur tijdens de sessie (Open-Meteo), voor de feedback-context.
+    "temperature_c": "REAL",
 }
 
 
@@ -164,9 +167,9 @@ def save_activity(
                pool_length, num_lengths, total_strokes,
                z1_s, z2_s, z3_s, z4_s, z5_s,
                pct_in_zone2, aerobic_efficiency,
-               user_note, wind_speed, wind_direction, wind_gusts,
+               user_note, wind_speed, wind_direction, wind_gusts, temperature_c,
                summary_json, source_file, imported_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             act.activity_key, act.sport, act.sub_sport, act.start_time.isoformat(),
             s.get("total_timer_time"), s.get("total_distance"),
@@ -183,6 +186,7 @@ def save_activity(
             wind.speed_kmh if wind else None,
             wind.direction_deg if wind else None,
             wind.gusts_kmh if wind else None,
+            wind.temperature_c if wind else None,
             json.dumps(s, default=str), act.source_file,
             datetime.now().isoformat(timespec="seconds"),
         ),

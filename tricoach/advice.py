@@ -49,12 +49,19 @@ met de datum en de data waarop het gebaseerd was.
 MAX_LOG_ENTRIES = 10
 
 
-def _last_md_section(path: Path) -> str | None:
-    """De laatste '## '-sectie uit een markdown-bestand (of None)."""
+def _last_md_section(path: Path, heading_contains: str | None = None) -> str | None:
+    """De laatste '## '-sectie uit een markdown-bestand (of None).
+
+    Met ``heading_contains`` wordt op een woord in de kopregel gefilterd —
+    nodig sinds adviezen.md náást weekadviezen ook per-sessie 'Sessie-advies'-
+    secties bevat (feedback-stap) en de weekadvies-weergave die moet overslaan.
+    """
     if not path.exists():
         return None
-    parts = path.read_text(encoding="utf-8").split("\n## ")
-    return "## " + parts[-1] if len(parts) > 1 else None
+    parts = path.read_text(encoding="utf-8").split("\n## ")[1:]
+    if heading_contains:
+        parts = [p for p in parts if heading_contains in p.splitlines()[0]]
+    return "## " + parts[-1] if parts else None
 
 
 def _recent_log_entries(memory_dir: Path, n: int = MAX_LOG_ENTRIES) -> str:
@@ -94,7 +101,7 @@ def _week_stats(conn: sqlite3.Connection) -> str:
 def build_context(conn: sqlite3.Connection, memory_dir: Path) -> str:
     """Bouw de volledige prompt-context uit memory en database."""
     doelen = (memory_dir / "doelen.md").read_text(encoding="utf-8")
-    vorige = _last_md_section(memory_dir / "adviezen.md")
+    vorige = _last_md_section(memory_dir / "adviezen.md", heading_contains="Weekadvies")
 
     blocks = [
         f"# Doelen en voorkeuren van de atleet\n\n{doelen}",
@@ -131,8 +138,12 @@ def generate_advice(router: LLMRouter, conn: sqlite3.Connection, memory_dir: Pat
 
 
 def last_advice(memory_dir: Path) -> str | None:
-    """Het laatst opgeslagen advies (voor weergave zonder nieuwe API-call)."""
-    return _last_md_section(memory_dir / "adviezen.md")
+    """Het laatst opgeslagen wéékadvies (voor weergave zonder nieuwe API-call).
+
+    Filtert op 'Weekadvies' zodat de per-sessie adviezen van de feedback-stap
+    de weergave in de Coach-tab niet verdringen.
+    """
+    return _last_md_section(memory_dir / "adviezen.md", heading_contains="Weekadvies")
 
 
 # ----------------------------------------------------------- inzichten --

@@ -31,9 +31,11 @@ import requests
 
 from tricoach.fit_parser import ParsedActivity
 
-# Open-Meteo: gratis archief-endpoint, geen key nodig.
+# Open-Meteo: gratis archief-endpoint, geen key nodig. Naast wind ook de
+# temperatuur — hitte verklaart een hogere hartslag/lager tempo net zo goed
+# als tegenwind.
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
-HOURLY_VARS = "wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+HOURLY_VARS = "wind_speed_10m,wind_direction_10m,wind_gusts_10m,temperature_2m"
 # Lokale tijdzone als string; pandas regelt de conversie (zoals elders in de
 # app), zodat we niet van de losse ``tzdata``-package afhangen.
 TIMEZONE = "Europe/Amsterdam"
@@ -61,6 +63,7 @@ class WindData:
     direction_deg: float
     gusts_kmh: float | None = None
     headwind_note: str | None = None
+    temperature_c: float | None = None
 
     @property
     def direction_label(self) -> str:
@@ -78,6 +81,8 @@ class WindData:
             parts.append(f"uitschieters tot {self.gusts_kmh:.0f} km/h")
         if self.headwind_note:
             parts.append(self.headwind_note)
+        if self.temperature_c is not None:
+            parts.append(f"temperatuur {self.temperature_c:.0f} °C")
         return ", ".join(parts)
 
 
@@ -196,12 +201,14 @@ def _pick_hour(payload: dict, target_hour: int) -> dict | None:
         return col[idx] if idx < len(col) else None
 
     speed, direction, gusts = at("wind_speed_10m"), at("wind_direction_10m"), at("wind_gusts_10m")
+    temp = at("temperature_2m")
     if speed is None or direction is None:
         return None
     return {
         "speed_kmh": float(speed),
         "direction_deg": float(direction),
         "gusts_kmh": float(gusts) if gusts is not None else None,
+        "temperature_c": float(temp) if temp is not None else None,
         "time": times[idx],
     }
 
@@ -238,6 +245,7 @@ def wind_for_activity(act: ParsedActivity, memory_dir: Path | None = None) -> Wi
         direction_deg=picked["direction_deg"],
         gusts_kmh=picked["gusts_kmh"],
         headwind_note=headwind_note(act, picked["direction_deg"]),
+        temperature_c=picked["temperature_c"],
     )
     if memory_dir:
         url = f"{ARCHIVE_URL}?latitude={coord[0]:.4f}&longitude={coord[1]:.4f}" \

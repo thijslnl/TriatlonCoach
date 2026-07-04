@@ -233,7 +233,7 @@ with st.sidebar:
                              f"{sport_label(r.activity.sport)} — {r.status}")
                     if r.status == "nieuw" and r.wind is not None:
                         st.caption(f"🌬️ Wind: {r.wind.as_text()}")
-                    # Alleen nieuwe sessies krijgen coaching-feedback (Haiku);
+                    # Alleen nieuwe sessies krijgen coaching-feedback (Sonnet);
                     # duplicaten niet, dat zou onnodig een API-call kosten.
                     if r.status == "nieuw":
                         try:
