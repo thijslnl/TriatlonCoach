@@ -1186,13 +1186,15 @@ with tab_lichaam:
     )
 
     body.ensure_table(conn)
+    metingen = body.load_measurements(conn)
 
-    # -- Invoer (optioneel voorgevuld via screenshot) -----------------------
+    # -- Invoer (voorgevuld met de laatste meting of een screenshot) --------
     with st.expander("➕ Nieuwe meting invoeren", expanded=False):
         st.caption(
-            "Vul in wat je hebt; lege velden worden niet opgeslagen. Eventueel "
-            "eerst een screenshot van de Fitdays-app uploaden om de velden "
-            "automatisch voor te vullen (lokaal gemma-model, gratis)."
+            "De velden staan voorgevuld met je laatste meting — pas alleen aan "
+            "wat veranderd is. Vul je liever automatisch: upload eerst een "
+            "screenshot van de Fitdays-app (lokaal gemma-model, gratis). "
+            "Velden op 0 worden niet opgeslagen."
         )
         shot = st.file_uploader(
             "Screenshot Fitdays (optioneel)", type=["png", "jpg", "jpeg"],
@@ -1208,6 +1210,7 @@ with tab_lichaam:
                     st.error(f"Uitlezen mislukt, vul handmatig in: {e}")
 
         prefill = st.session_state.get("body_prefill", {})
+        laatste_meting = metingen.iloc[-1] if not metingen.empty else None
         with st.form("body_form"):
             meetdatum = st.date_input("Datum", value=date.today())
             cols = st.columns(3)
@@ -1215,8 +1218,15 @@ with tab_lichaam:
             for idx, (col, label, eenheid, stap) in enumerate(body.FIELDS):
                 with cols[idx % 3]:
                     label_txt = f"{label}{f' ({eenheid})' if eenheid else ''}"
+                    # Voorvullen: screenshot-waarde > laatste meting > leeg.
+                    # Een nieuwe meting wijkt meestal weinig af van de vorige,
+                    # dus zo hoef je alleen de verschillen aan te passen.
+                    basis = prefill.get(col) or 0.0
+                    if not basis and laatste_meting is not None \
+                            and pd.notna(laatste_meting.get(col)):
+                        basis = float(laatste_meting[col])
                     val = st.number_input(
-                        label_txt, value=float(prefill.get(col, 0.0)),
+                        label_txt, value=float(basis),
                         step=stap, format="%.1f", key=f"body_{col}",
                     )
                     ingevuld[col] = val
@@ -1235,8 +1245,6 @@ with tab_lichaam:
                 st.session_state.pop("body_prefill", None)
                 st.success(f"Meting van {meetdatum:%d-%m-%Y} opgeslagen.")
                 st.rerun()
-
-    metingen = body.load_measurements(conn)
 
     # -- Meting verwijderen -------------------------------------------------
     if not metingen.empty:
@@ -1283,30 +1291,30 @@ with tab_lichaam:
             )
         sel = body.in_range(metingen, start_d, end_d)
 
-        # -- Losse trendgrafieken -------------------------------------------
+        # -- Trendrooster: alle maten met data --------------------------------
         st.subheader("Trends per maat")
-        trend_meta = [
-            ("weight_kg", "Gewicht (kg)", "#4c78a8"),
-            ("fat_pct", "Lichaamsvet (%)", "#e45756"),
-            ("muscle_mass_kg", "Spiermassa (kg)", "#54a24b"),
-            ("visceral_fat", "Visceraal vet", "#f58518"),
-        ]
-        g1, g2 = st.columns(2)
-        for idx, (col, titel, kleur) in enumerate(trend_meta):
+        st.caption("Alle maten van de weegschaal, klein naast elkaar; "
+                   "maten zonder metingen worden overgeslagen.")
+        grid = st.columns(3)
+        paneel = 0
+        for col, label, eenheid, _stap in body.FIELDS:
             serie = sel[["measured_on", col]].dropna()
-            doel = g1 if idx % 2 == 0 else g2
-            with doel:
-                if serie.empty:
-                    st.info(f"Geen data voor {titel.lower()}.")
-                    continue
+            if serie.empty:
+                continue
+            titel = f"{label}{f' ({eenheid})' if eenheid else ''}"
+            with grid[paneel % 3]:
                 fig = px.line(serie, x="measured_on", y=col, markers=True,
-                              labels={"measured_on": "Datum", col: titel})
-                fig.update_traces(line=dict(color=kleur), marker=dict(size=10),
-                                  hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}<extra></extra>")
-                fig.update_layout(title=titel)
+                              labels={"measured_on": "", col: ""})
+                fig.update_traces(
+                    line=dict(color=PAL["cats"][0]), marker=dict(size=8),
+                    hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}<extra></extra>")
+                fig.update_layout(title=titel, height=240,
+                                  margin=dict(t=40, b=10, l=10, r=10))
                 date_xaxis(fig, serie["measured_on"])
                 pad_single_point(fig, serie["measured_on"], days=7)
-                chart(fig, show_legend=False)
+                st.plotly_chart(style_fig(fig, show_legend=False), width="stretch",
+                                config=PLOTLY_CONFIG, key=f"body_trend_{col}")
+            paneel += 1
 
         # -- Gecombineerd (genormaliseerd) ----------------------------------
         combo = body.normalized_trends(sel, body.TREND_FIELDS)
