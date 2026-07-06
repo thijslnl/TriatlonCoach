@@ -155,8 +155,24 @@ def decoupling(conn: sqlite3.Connection, acts: pd.DataFrame,
 
 # ------------------------------------------------------ racevoorspelling --
 
-def race_prediction(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict:
-    """Ruwe voorspelling van de standaard/olympische racetijden (1,5 / 40 / 10 km).
+# Standaard/olympische afstand als terugval wanneer een race geen
+# gestructureerde afstanden heeft (of er nog geen race is ingesteld).
+STANDARD_RACE = {"swim_m": 1500.0, "bike_m": 40000.0, "run_m": 10000.0}
+
+
+def race_distances(race: dict | None) -> dict:
+    """De zwem-/fiets-/loopafstand (m) van een race uit config.yaml.
+
+    Leest de gestructureerde velden ``swim_m``/``bike_m``/``run_m`` en valt
+    per ontbrekend veld terug op de standaardafstand.
+    """
+    race = race or {}
+    return {k: float(race.get(k) or v) for k, v in STANDARD_RACE.items()}
+
+
+def race_prediction(conn: sqlite3.Connection, acts: pd.DataFrame,
+                    race: dict | None = None) -> dict:
+    """Ruwe voorspelling van de racetijden voor de ingestelde afstanden.
 
     Geeft per onderdeel seconden (of None bij te weinig data) plus een
     totaal inclusief een wisselbuffer. Bewust simpel gehouden: lopen via
@@ -164,20 +180,21 @@ def race_prediction(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict:
     het recente sessiegemiddelde. De zwemsnelheid komt uit afstand en zwemtijd
     (zie :func:`swim_speed_ms`), niet uit het soms ontbrekende avg_speed_ms.
     """
-    pred: dict[str, float | None] = {"zwem_1500": None, "fiets_40k": None, "loop_10k": None}
+    afst = race_distances(race)
+    pred: dict = {"zwem": None, "fiets": None, "loop": None, "afstanden": afst}
 
     runs = acts[(acts["sport"] == "running") & (acts["distance_m"] >= 3000)].dropna(
         subset=["avg_speed_ms"])
     if not runs.empty:
         beste = runs.loc[runs["avg_speed_ms"].idxmax()]
         t1, d1 = beste["duration_s"], beste["distance_m"]
-        pred["loop_10k"] = t1 * (10000 / d1) ** RIEGEL
+        pred["loop"] = t1 * (afst["run_m"] / d1) ** RIEGEL
 
     rides = acts[(acts["sport"] == "cycling") & (acts["distance_m"] >= 15000)].dropna(
         subset=["avg_speed_ms"])
     if not rides.empty:
         snelste = rides["avg_speed_ms"].max()
-        pred["fiets_40k"] = 40000 / snelste
+        pred["fiets"] = afst["bike_m"] / snelste
 
     swims = acts[acts["sport"] == "swimming"]
     if not swims.empty:
@@ -185,38 +202,41 @@ def race_prediction(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict:
         recent = swims.sort_values("start_time").iloc[-1]
         speed = swim_speed_ms(conn, recent)
         if speed:
-            pred["zwem_1500"] = 1500 / speed
+            pred["zwem"] = afst["swim_m"] / speed
 
-    pred["wissels"] = 5 * 60  # ruwe buffer voor T1 + T2 (iets ruimer op olympische afstand)
-    delen = [pred["zwem_1500"], pred["fiets_40k"], pred["loop_10k"]]
+    pred["wissels"] = 5 * 60  # ruwe buffer voor T1 + T2
+    delen = [pred["zwem"], pred["fiets"], pred["loop"]]
     pred["totaal"] = sum(delen) + pred["wissels"] if all(d is not None for d in delen) else None
     return pred
 
 
-def readiness(acts: pd.DataFrame) -> list[tuple[str, str]]:
+def readiness(acts: pd.DataFrame, race: dict | None = None) -> list[tuple[str, str]]:
     """Gereedheid per discipline als (emoji, tekst), op basis van racevolume."""
+    afst = race_distances(race)
     out = []
     swims = acts[acts["sport"] == "swimming"]
     langste_zwem = swims["distance_m"].max() if not swims.empty else 0
-    if langste_zwem >= 1500:
+    if langste_zwem >= afst["swim_m"]:
         out.append(("✅", f"Zwemmen: langste sessie {langste_zwem:.0f} m — racevolume gehaald."))
     elif langste_zwem > 0:
-        out.append(("⚠️", f"Zwemmen: langste sessie {langste_zwem:.0f} m van de 1500 m — "
-                          "bouw rustig uit, de crawlcursus gaat hierbij helpen."))
+        out.append(("⚠️", f"Zwemmen: langste sessie {langste_zwem:.0f} m van de "
+                          f"{afst['swim_m']:.0f} m — bouw rustig uit."))
     else:
         out.append(("⚠️", "Zwemmen: nog geen sessies."))
 
     rides = acts[acts["sport"] == "cycling"]
     langste_rit = rides["distance_m"].max() if not rides.empty else 0
-    out.append(("✅" if langste_rit >= 40000 else "⚠️",
+    out.append(("✅" if langste_rit >= afst["bike_m"] else "⚠️",
                 f"Fietsen: langste rit {langste_rit / 1000:.0f} km "
-                f"({'ruim boven' if langste_rit >= 40000 else 'onder'} de 40 km van de race)."))
+                f"({'ruim boven' if langste_rit >= afst['bike_m'] else 'onder'} "
+                f"de {afst['bike_m'] / 1000:.0f} km van de race)."))
 
     runs = acts[acts["sport"] == "running"]
     langste_loop = runs["distance_m"].max() if not runs.empty else 0
-    out.append(("✅" if langste_loop >= 10000 else "⚠️",
+    out.append(("✅" if langste_loop >= afst["run_m"] else "⚠️",
                 f"Lopen: langste loop {langste_loop / 1000:.1f} km "
-                f"({'ruim boven' if langste_loop >= 10000 else 'onder'} de 10 km van de race)."))
+                f"({'ruim boven' if langste_loop >= afst['run_m'] else 'onder'} "
+                f"de {afst['run_m'] / 1000:.0f} km van de race)."))
     return out
 
 

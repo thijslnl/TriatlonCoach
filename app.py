@@ -48,6 +48,7 @@ from tricoach.progress import (
     load_curves,
     personal_records,
     progress_summary_text,
+    race_distances,
     race_prediction,
     readiness,
     swim_progression,
@@ -773,21 +774,27 @@ with tab_voortgang:
 
     st.divider()
     # -- Racevoorspelling -----------------------------------------------------
-    st.subheader("🏁 Racevoorspelling — standaard (1,5 km / 40 km / 10 km)")
-    pred = race_prediction(conn, acts)
+    afst = race_distances(race)
+    st.subheader(
+        f"🏁 Racevoorspelling — {race.get('name') or 'standaard'} "
+        f"({afst['swim_m'] / 1000:g} km / {afst['bike_m'] / 1000:g} km / "
+        f"{afst['run_m'] / 1000:g} km)"
+    )
+    pred = race_prediction(conn, acts, race)
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Zwemmen 1,5 km", fmt_duration(pred["zwem_1500"]))
-    c2.metric("Fietsen 40 km", fmt_duration(pred["fiets_40k"]))
-    c3.metric("Lopen 10 km", fmt_duration(pred["loop_10k"]))
+    c1.metric(f"Zwemmen {afst['swim_m'] / 1000:g} km", fmt_duration(pred["zwem"]))
+    c2.metric(f"Fietsen {afst['bike_m'] / 1000:g} km", fmt_duration(pred["fiets"]))
+    c3.metric(f"Lopen {afst['run_m'] / 1000:g} km", fmt_duration(pred["loop"]))
     c4.metric("Wissels (T1+T2)", fmt_duration(pred["wissels"]))
     c5.metric("Totaal (schatting)", fmt_duration(pred["totaal"]))
     st.caption(
         "Ruwe schatting: lopen via Riegel-schaling vanaf je beste recente loop, fietsen via je "
         "snelste rit (≥15 km), zwemmen via het tempo van je laatste zwemsessie — dat verandert "
         "nu het snelst, dus deze voorspelling wordt elke zwemsessie beter. Racedag-effecten "
-        "(wetsuit, drafting, spanning) zitten er niet in."
+        "(wetsuit, drafting, spanning) zitten er niet in. De afstanden volgen de eerste race "
+        "op de instellingen-tab."
     )
-    for emoji, tekst in readiness(acts):
+    for emoji, tekst in readiness(acts, race):
         st.markdown(f"{emoji} {tekst}")
 
     st.divider()
@@ -1378,17 +1385,36 @@ with tab_settings:
     for col in ["name", "date", "distances", "goal", "target_time"]:
         if col not in races_df:
             races_df[col] = ""
+    for col in ["swim_m", "bike_m", "run_m"]:
+        if col not in races_df:
+            races_df[col] = None
     races_df["date"] = pd.to_datetime(races_df["date"])
     edited_races = st.data_editor(
-        races_df[["name", "date", "distances", "goal", "target_time"]],
+        races_df[["name", "date", "swim_m", "bike_m", "run_m",
+                  "distances", "goal", "target_time"]],
         column_config={
             "name": st.column_config.TextColumn("Race"),
             "date": st.column_config.DateColumn("Datum", format="DD-MM-YYYY"),
-            "distances": st.column_config.TextColumn("Afstanden"),
+            "swim_m": st.column_config.NumberColumn(
+                "Zwem (m)", min_value=0, step=100,
+                help="Zwemafstand in meters; leeg = standaard 1500 m."),
+            "bike_m": st.column_config.NumberColumn(
+                "Fiets (m)", min_value=0, step=1000,
+                help="Fietsafstand in meters; leeg = standaard 40.000 m."),
+            "run_m": st.column_config.NumberColumn(
+                "Loop (m)", min_value=0, step=500,
+                help="Loopafstand in meters; leeg = standaard 10.000 m."),
+            "distances": st.column_config.TextColumn(
+                "Afstanden (tekst)", help="Vrije omschrijving, alleen voor weergave."),
             "goal": st.column_config.TextColumn("Doel"),
             "target_time": st.column_config.TextColumn("Streeftijd"),
         },
         num_rows="dynamic", hide_index=True, width="stretch", key="races_editor",
+    )
+    st.caption(
+        "De racevoorspelling en gereedheid op de voortgang-tab rekenen met de "
+        "meterafstanden van de eerste race; lege velden vallen terug op de "
+        "standaardafstand (1,5 / 40 / 10 km)."
     )
 
     st.subheader("🗓️ Trainingsdagen & beschikbare tijd")
@@ -1435,6 +1461,9 @@ with tab_settings:
             {
                 "name": str(r["name"]).strip(),
                 "date": pd.to_datetime(r["date"]).date(),
+                "swim_m": int(r["swim_m"]) if pd.notna(r["swim_m"]) and r["swim_m"] else None,
+                "bike_m": int(r["bike_m"]) if pd.notna(r["bike_m"]) and r["bike_m"] else None,
+                "run_m": int(r["run_m"]) if pd.notna(r["run_m"]) and r["run_m"] else None,
                 "distances": str(r["distances"] or ""),
                 "goal": str(r["goal"] or ""),
                 "target_time": str(r.get("target_time") or ""),
