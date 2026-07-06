@@ -1054,20 +1054,25 @@ with tab_lichaam:
                 "als prestatieproxy. Daalt het gewicht terwijl het fietsvolume op peil "
                 "blijft, dan beweegt je power-to-weight de goede kant op."
             )
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=kruising["week"], y=kruising["fiets_km"], name="Fietskilometers/week",
-                marker_color="rgba(76,120,168,0.4)", yaxis="y2",
-                hovertemplate="%{x}: %{y:.0f} km<extra></extra>"))
+            # Twee panelen met gedeelde week-as in plaats van een dubbele
+            # y-as: twee schalen over elkaar suggereren een verband tussen
+            # lijnhoogtes dat er niet is en lezen lastig.
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                row_heights=[0.55, 0.45], vertical_spacing=0.08)
             fig.add_trace(go.Scatter(
                 x=kruising["week"], y=kruising["weight_kg"], name="Gewicht (kg)",
-                line=dict(color="#4c78a8", width=3), mode="lines+markers",
-                hovertemplate="%{x}: %{y:.1f} kg<extra></extra>"))
-            fig.update_layout(
-                yaxis=dict(title="Gewicht (kg)"),
-                yaxis2=dict(title="Fiets-km/week", overlaying="y", side="right", showgrid=False),
-                xaxis_title="Week",
-            )
+                line=dict(color=PAL["cats"][0], width=3), mode="lines+markers",
+                hovertemplate="%{x}: %{y:.1f} kg<extra></extra>"),
+                row=1, col=1)
+            fig.add_trace(go.Bar(
+                x=kruising["week"], y=kruising["fiets_km"], name="Fietskilometers/week",
+                marker_color=with_alpha(SPORT_COLORS["Fietsen"], 0.6),
+                hovertemplate="%{x}: %{y:.0f} km<extra></extra>"),
+                row=2, col=1)
+            fig.update_yaxes(title_text="Gewicht (kg)", row=1, col=1)
+            fig.update_yaxes(title_text="Fiets-km/week", row=2, col=1)
+            fig.update_xaxes(title_text="Week", row=2, col=1)
+            fig.update_layout(hovermode="x unified")
             chart(fig)
 
     st.divider()
