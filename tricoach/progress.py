@@ -267,6 +267,13 @@ def css_estimate(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict | None:
         lengths = load_lengths(conn, act["activity_key"])
         if lengths.empty or "start_time" not in lengths:
             continue
+        # Sessies met wisselende baanlengtes (totaal ≠ banen × baanlengte,
+        # bijv. een zwembad dat halverwege de banen verlegde) overslaan: de
+        # afstand per baan is daar te onzeker voor een recordschatting.
+        afstand = act.get("distance_m")
+        if afstand and not pd.isna(afstand) \
+                and abs(len(lengths) * pool - afstand) > 0.02 * afstand:
+            continue
         lengths = lengths.dropna(subset=["start_time", "total_timer_time"])
         lengths = lengths[lengths["start_time"].astype(str).str.lower() != "none"]
         if lengths.empty:

@@ -220,21 +220,52 @@ def run_power(activities: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def lane_meters(lengths: pd.DataFrame, pool_length: float | None,
+                distance_m: float | None) -> pd.Series:
+    """Afstand per baan (m), robuust voor banen van wisselende lengte.
+
+    Normaal is elke baan simpelweg ``pool_length``. Maar als de totale
+    sessieafstand duidelijk afwijkt van banen × baanlengte (bijv. het zwembad
+    ging halverwege van 25 m- naar 15 m-banen, terwijl het horloge op 25 m
+    bleef staan), dan is dát niet meer waar. In dat geval verdelen we de
+    sessieafstand naar rato van het aantal slagen per baan: een kortere baan
+    kost evenredig minder slagen, en het sessietotaal klopt weer. Dit is een
+    schatting per baan, maar veel eerlijker dan elke baan even lang rekenen.
+    """
+    n = len(lengths)
+    pool = float(pool_length) if pool_length and not pd.isna(pool_length) else 25.0
+    uniform = pd.Series([pool] * n, index=lengths.index)
+    if not distance_m or pd.isna(distance_m) or n == 0:
+        return uniform
+    if abs(n * pool - distance_m) <= 0.02 * distance_m:
+        return uniform
+    slagen = pd.to_numeric(lengths.get("total_strokes"), errors="coerce")
+    if slagen.isna().any() or slagen.sum() <= 0:
+        # Geen bruikbare slagdata: gemiddelde afstand per baan als terugval.
+        return pd.Series([distance_m / n] * n, index=lengths.index)
+    return slagen / slagen.sum() * distance_m
+
+
 def swim_length_matrix(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
-    """Tijd per baan per zwemsessie als matrix voor een heatmap.
+    """Tempo per baan per zwemsessie als matrix voor een heatmap.
 
     Rijen: sessies (index = startdatum), kolommen: baannummer (1..n), waarde:
-    seconden per baan. Kortere sessies krijgen NaN in de staart.
+    seconden per 100 m — vergelijkbaar tussen banen en sessies, ook als de
+    baanlengte verschilt (zie :func:`lane_meters`). Kortere sessies krijgen
+    NaN in de staart.
     """
     swims = activities[activities["sport"] == "swimming"].sort_values("start_time")
     rows = {}
     for _, act in swims.iterrows():
         lengths = pd.read_sql_query(
-            "SELECT total_timer_time FROM lengths WHERE activity_key = ? "
-            "ORDER BY timestamp", conn, params=(act["activity_key"],))
+            "SELECT total_timer_time, total_strokes FROM lengths "
+            "WHERE activity_key = ? ORDER BY timestamp",
+            conn, params=(act["activity_key"],))
         if lengths.empty:
             continue
-        rows[act["start_time"]] = lengths["total_timer_time"].reset_index(drop=True)
+        meters = lane_meters(lengths, act.get("pool_length"), act.get("distance_m"))
+        tempo = (lengths["total_timer_time"] / meters * 100).where(meters > 0)
+        rows[act["start_time"]] = tempo.reset_index(drop=True)
     if not rows:
         return pd.DataFrame()
     matrix = pd.DataFrame(rows).T

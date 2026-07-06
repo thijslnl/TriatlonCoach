@@ -23,6 +23,7 @@ from tricoach.advice import generate_advice, generate_insights, last_advice, las
 from tricoach.analysis import (
     aerobic_efficiency_trend,
     pace_at_hr,
+    lane_meters,
     run_power,
     stroke_distribution,
     swim_length_matrix,
@@ -956,21 +957,28 @@ with tab_sessie:
 
     if is_zwem:
         if banen.empty:
-            st.info("Geen baandata voor deze sessie.")
+            st.info("Geen baandata voor deze sessie (bijv. open water).")
         else:
             banen = banen.reset_index(drop=True)
             banen["baan"] = banen.index + 1
             banen["Slag"] = banen["swim_stroke"].map(stroke_label)
+            # Tempo per 100 m i.p.v. tijd per baan: vergelijkbaar, ook als de
+            # baanlengte binnen de sessie wisselde (zie lane_meters).
+            banen["meters"] = lane_meters(
+                banen, sessie.get("pool_length"), sessie.get("distance_m"))
+            banen["tempo_100m"] = (banen["total_timer_time"] / banen["meters"]
+                                   * 100).where(banen["meters"] > 0)
             fig = px.bar(
-                banen, x="baan", y="total_timer_time", color="Slag",
-                color_discrete_map=STROKE_COLORS, custom_data=["total_strokes"],
-                labels={"baan": "Baan", "total_timer_time": "Tijd per baan (s)"},
+                banen, x="baan", y="tempo_100m", color="Slag",
+                color_discrete_map=STROKE_COLORS,
+                custom_data=["total_strokes", "meters"],
+                labels={"baan": "Baan", "tempo_100m": "Tempo (s/100m)"},
             )
             fig.update_traces(
                 marker_line=dict(width=1, color=PAL["surface"]),
-                hovertemplate="baan %{x} · %{y:.0f} s · %{customdata[0]:.0f} slagen · "
-                              "%{fullData.name}<extra></extra>")
-            fig.update_layout(title="Baan voor baan (kleur = slagtype)")
+                hovertemplate="baan %{x} · %{y:.0f} s/100m · ~%{customdata[1]:.0f} m · "
+                              "%{customdata[0]:.0f} slagen · %{fullData.name}<extra></extra>")
+            fig.update_layout(title="Baan voor baan als tempo (kleur = slagtype)")
             chart(fig)
             st.caption(
                 "Gelijkmatige balken = constant tempo. Worden de crawlbanen naar "
@@ -1233,9 +1241,11 @@ with tab_zwemmen:
 
         st.subheader("Tempo per baan")
         st.caption(
-            "Elke rij is een sessie, elke cel een baan: donkerder = langzamer. "
-            "Zo zie je in één blik waar het tempo in een sessie wegzakte — en of "
-            "dat punt per sessie later komt te liggen."
+            "Elke rij is een sessie, elke cel een baan, als tempo per 100 m: "
+            "donkerder = langzamer. Zo zie je in één blik waar het tempo in een "
+            "sessie wegzakte — en of dat punt per sessie later komt te liggen. "
+            "Bij een sessie met wisselende baanlengtes wordt de afstand per baan "
+            "geschat via het aantal slagen."
         )
         matrix = swim_length_matrix(conn, acts)
         if matrix.empty:
@@ -1244,10 +1254,10 @@ with tab_zwemmen:
             matrix.index = [f"{d:%d-%m-%Y}" for d in matrix.index]
             fig = px.imshow(
                 matrix, aspect="auto", color_continuous_scale=PAL["seq"],
-                labels=dict(x="Baan", y="Sessie", color="s/baan"),
+                labels=dict(x="Baan", y="Sessie", color="s/100m"),
             )
             fig.update_traces(
-                hovertemplate="%{y} · baan %{x}: %{z:.0f} s<extra></extra>")
+                hovertemplate="%{y} · baan %{x}: %{z:.0f} s/100m<extra></extra>")
             chart(fig, show_legend=False)
 
         st.subheader("Slagverdeling per sessie")
