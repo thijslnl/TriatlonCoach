@@ -55,7 +55,7 @@ from tricoach.llm import LLMRouter
 from tricoach.llm.log import usage_summary
 from tricoach.llm.observations import session_observation
 from tricoach.lthr import append_entry as lthr_append, load_history as lthr_history
-from tricoach.palette import get_palette
+from tricoach.palette import get_palette, with_alpha
 from tricoach.viz import (
     PLOTLY_CONFIG,
     date_xaxis,
@@ -98,6 +98,13 @@ ZONE_LABELS = {
     "Z5": f"Zone 5 (> {BOUNDS[3]})",
 }
 ZONE_COLORS = dict(zip(ZONE_LABELS.values(), PAL["zones"]))
+# Vaste kleur per zwemslag (Nederlandse labels), zodat elke slag in elke
+# grafiek dezelfde kleur houdt — ook als een sessie maar twee slagen bevat.
+STROKE_COLORS = dict(zip(
+    [stroke_label(s) for s in
+     ("freestyle", "breaststroke", "backstroke", "butterfly", "mixed", "drill", "im")],
+    PAL["cats"],
+))
 def chart(fig, show_legend: bool = True):
     """Render een figuur in huisstijl, met de gedeelde modebar-config."""
     st.plotly_chart(style_fig(fig, show_legend), width="stretch", config=PLOTLY_CONFIG)
@@ -312,23 +319,36 @@ with tab_overzicht:
             category_orders={"week": sorted(vol["week"].unique())},
             labels={"week": "Week", "uren": "Uren", "sport": "Sport"},
         )
-        fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.1f} uur<extra></extra>")
+        fig.update_traces(
+            marker_line=dict(width=1, color=PAL["surface"]),
+            hovertemplate="%{x} · %{fullData.name}: %{y:.1f} uur<extra></extra>")
         chart(fig)
 
     with col_rechts:
         st.subheader("Tijd in hartslagzones per week")
         tz_df = weekly_zone_time(acts)
         tz_df["zone"] = tz_df["zone"].map(ZONE_LABELS)
+        als_pct = st.toggle(
+            "Toon als percentage", key="zonetijd_pct",
+            help="Percentages maken weken met verschillend volume vergelijkbaar.")
+        if als_pct:
+            tz_df["waarde"] = (tz_df["minuten"] / tz_df.groupby("week")["minuten"]
+                               .transform("sum") * 100)
+            y_col, y_label, hover_fmt = "waarde", "Aandeel (%)", "%{y:.0f}%"
+        else:
+            y_col, y_label, hover_fmt = "minuten", "Minuten", "%{y:.0f} min"
         fig = px.bar(
-            tz_df, x="week", y="minuten", color="zone",
+            tz_df, x="week", y=y_col, color="zone",
             color_discrete_map=ZONE_COLORS,
             category_orders={
                 "week": sorted(tz_df["week"].unique()),
                 "zone": list(ZONE_COLORS),
             },
-            labels={"week": "Week", "minuten": "Minuten", "zone": "Zone"},
+            labels={"week": "Week", y_col: y_label, "zone": "Zone"},
         )
-        fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.0f} min<extra></extra>")
+        fig.update_traces(
+            marker_line=dict(width=1, color=PAL["surface"]),
+            hovertemplate=f"%{{x}} · %{{fullData.name}}: {hover_fmt}<extra></extra>")
         chart(fig)
 
     st.subheader("Mijn hartslagzones & LTHR-ontwikkeling")
@@ -362,7 +382,7 @@ with tab_overzicht:
     for (label, kleur), top in zip(ZONE_COLORS.items(), tops):
         fig.add_trace(go.Scatter(
             x=dates, y=top, name=label, fill="tonexty",
-            line=dict(width=0), fillcolor=kleur, line_shape="hv",
+            line=dict(width=0), fillcolor=with_alpha(kleur, 0.55), line_shape="hv",
             hovertemplate=f"{label}: tot %{{y}} bpm<extra></extra>",
         ))
     fig.add_trace(go.Scatter(
@@ -460,10 +480,19 @@ with tab_trends:
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km<extra></extra>",
             )
             fig.update_layout(title="Hardlopen — tempo in zone 2 (sneller = hoger)")
+            toon_legenda = len(run_trend) >= 4
+            if toon_legenda:  # voortschrijdend gemiddelde dempt dagvorm en weer
+                fig.update_traces(name="Per sessie", showlegend=True)
+                gemiddeld = (1000 / run_trend["speed_ms"]).rolling(3).mean()
+                fig.add_scatter(
+                    x=run_trend["start_time"], y=pace_as_time(gemiddeld),
+                    mode="lines", name="Gemiddelde (3 sessies)",
+                    line=dict(color=PAL["muted"], dash="dot", width=2),
+                    hoverinfo="skip")
             pad_single_point(fig, run_trend["start_time"],
                              y_center=run_trend["tempo"].iloc[0],
                              y_pad=pd.Timedelta(seconds=30), reversed_y=True)
-            chart(fig, show_legend=False)
+            chart(fig, show_legend=toon_legenda)
         if 0 < len(run_trend) < n_runs:
             st.caption(
                 f"{n_runs - len(run_trend)} van je {n_runs} loopsessies is weggelaten: "
@@ -485,9 +514,18 @@ with tab_trends:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h<extra></extra>",
             )
             fig.update_layout(title="Fietsen — snelheid in zone 2")
+            toon_legenda = len(bike_trend) >= 4
+            if toon_legenda:
+                fig.update_traces(name="Per sessie", showlegend=True)
+                fig.add_scatter(
+                    x=bike_trend["start_time"],
+                    y=bike_trend["snelheid_kmh"].rolling(3).mean(),
+                    mode="lines", name="Gemiddelde (3 sessies)",
+                    line=dict(color=PAL["muted"], dash="dot", width=2),
+                    hoverinfo="skip")
             pad_single_point(fig, bike_trend["start_time"],
                              y_center=bike_trend["snelheid_kmh"].iloc[0], y_pad=3)
-            chart(fig, show_legend=False)
+            chart(fig, show_legend=toon_legenda)
         if 0 < len(bike_trend) < n_rides:
             st.caption(
                 f"{n_rides - len(bike_trend)} van je {n_rides} fietssessies is weggelaten: "
@@ -540,6 +578,12 @@ with tab_trends:
             fig.update_traces(hovertemplate=hover)
             if soort == "tempo":
                 pace_axis(fig)
+            # Zone-2-band: zo zie je meteen welke sessies echt rustig waren.
+            fig.add_vrect(
+                x0=Z2[0], x1=Z2[1], line_width=0,
+                fillcolor=with_alpha(PAL["zones"][1], 0.15),
+                annotation_text="zone 2", annotation_position="top left",
+                annotation_font_color=PAL["muted"])
             fig.update_layout(title=titel)
             chart(fig, show_legend=False)
 
@@ -628,19 +672,18 @@ with tab_voortgang:
     if not dec.empty:
         dec = dec.copy().sort_values("start_time")
         dec["Sport"] = dec["sport"].map(sport_label)
-        dec["label"] = dec["start_time"].dt.strftime("%d-%m")
         fig = px.bar(
-            dec, x="label", y="decoupling_pct", color="Sport",
-            color_discrete_map=SPORT_COLORS,
-            labels={"label": "Sessie", "decoupling_pct": "Decoupling (%)"},
-            category_orders={"label": dec["label"].tolist()},
+            dec, x="start_time", y="decoupling_pct", color="Sport",
+            color_discrete_map=SPORT_COLORS, barmode="group",
+            labels={"start_time": "Datum", "decoupling_pct": "Decoupling (%)"},
         )
-        # Forceer een categorie-as: plotly parst anders labels als "31-05" als
-        # een datum (→ mei 2031). Zo blijft het gewoon dag-maand, chronologisch.
-        fig.update_xaxes(type="category")
-        fig.add_hline(y=5, line_dash="dash", line_color="#e45756",
-                      annotation_text="richtwaarde 5%")
-        fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.1f}%<extra></extra>")
+        date_xaxis(fig, dec["start_time"])
+        fig.add_hline(y=5, line_dash="dash", line_color=PAL["ref_line"],
+                      annotation_text="richtwaarde 5%",
+                      annotation_font_color=PAL["muted"])
+        fig.update_traces(
+            marker_line=dict(width=1, color=PAL["surface"]),
+            hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: %{y:.1f}%<extra></extra>")
         fig.update_layout(title="HR-decoupling per sessie (lager = betere aerobe basis)")
         chart(fig)
 
@@ -695,6 +738,7 @@ with tab_voortgang:
             swolf_slag["Slag"] = swolf_slag["slag"].map(stroke_label)
             fig = px.line(
                 swolf_slag, x="start_time", y="swolf", color="Slag", markers=True,
+                color_discrete_map=STROKE_COLORS,
                 labels={"start_time": "Datum", "swolf": "SWOLF"},
             )
             fig.update_traces(
@@ -717,15 +761,15 @@ with tab_lopen:
         with c1:
             fig = px.scatter(
                 runs, x="start_time", y="tempo", color="avg_hr",
-                color_continuous_scale="RdYlGn_r",
+                color_continuous_scale=PAL["seq"],
                 labels={"start_time": "Datum", "tempo": "Tempo (min/km)",
                         "avg_hr": "Gem. HR"},
             )
             pace_axis(fig)
             fig.update_traces(
                 mode="lines+markers",
-                marker=dict(size=14, line=dict(width=1, color="rgba(255,255,255,0.7)")),
-                line=dict(color="rgba(150,150,150,0.4)"),
+                marker=dict(size=14, line=dict(width=1, color=PAL["surface"])),
+                line=dict(color=with_alpha(PAL["muted"], 0.4)),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km · HR %{marker.color}<extra></extra>",
             )
             fig.update_layout(title="Tempo per sessie (kleur = gemiddelde hartslag)")
@@ -736,9 +780,15 @@ with tab_lopen:
                 labels={"start_time": "Datum", "cadans_spm": "Cadans (stappen/min)"},
             )
             fig.update_traces(
-                marker=dict(size=11),
+                marker=dict(size=11), line=dict(color=SPORT_COLORS["Hardlopen"]),
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} stappen/min<extra></extra>",
             )
+            # Richtbereik voor duurlopen; lager wijst vaak op overstriding.
+            fig.add_hrect(y0=170, y1=180, line_width=0,
+                          fillcolor=with_alpha(PAL["zones"][1], 0.15),
+                          annotation_text="richtbereik 170–180",
+                          annotation_position="top left",
+                          annotation_font_color=PAL["muted"])
             fig.update_layout(title="Cadans per sessie")
             chart(fig, show_legend=False)
 
@@ -753,14 +803,14 @@ with tab_fietsen:
         with c1:
             fig = px.scatter(
                 rides, x="start_time", y="snelheid_kmh", color="avg_hr",
-                color_continuous_scale="RdYlGn_r",
+                color_continuous_scale=PAL["seq"],
                 labels={"start_time": "Datum", "snelheid_kmh": "Snelheid (km/h)",
                         "avg_hr": "Gem. HR"},
             )
             fig.update_traces(
                 mode="lines+markers",
-                marker=dict(size=14, line=dict(width=1, color="rgba(255,255,255,0.7)")),
-                line=dict(color="rgba(150,150,150,0.4)"),
+                marker=dict(size=14, line=dict(width=1, color=PAL["surface"])),
+                line=dict(color=with_alpha(PAL["muted"], 0.4)),
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h · HR %{marker.color}<extra></extra>",
             )
             fig.update_layout(title="Snelheid per rit (kleur = gemiddelde hartslag)")
@@ -770,7 +820,9 @@ with tab_fietsen:
                 rides, x="start_time", y="total_ascent",
                 labels={"start_time": "Datum", "total_ascent": "Hoogtemeters"},
             )
-            fig.update_traces(hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} m<extra></extra>")
+            fig.update_traces(
+                marker_color=SPORT_COLORS["Fietsen"],
+                hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} m<extra></extra>")
             fig.update_layout(title="Hoogtemeters per rit")
             chart(fig, show_legend=False)
 
@@ -786,7 +838,7 @@ with tab_zwemmen:
                 labels={"start_time": "Datum", "swolf": "SWOLF"},
             )
             fig.update_traces(
-                marker=dict(size=11),
+                marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
                 hovertemplate="%{x|%d-%m-%Y} · SWOLF %{y:.0f}<extra></extra>",
             )
             fig.update_layout(title="Gemiddelde SWOLF per sessie (lager = efficiënter)")
@@ -800,7 +852,7 @@ with tab_zwemmen:
             )
             pace_axis(fig)
             fig.update_traces(
-                marker=dict(size=11),
+                marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} /100m<extra></extra>",
             )
             fig.update_layout(title="Tempo per 100 meter (sneller = hoger)")
@@ -815,7 +867,8 @@ with tab_zwemmen:
         if not lengths.empty:
             lengths["Slag"] = lengths["swim_stroke"].map(stroke_label)
             st.subheader(f"Slagverdeling laatste sessie ({laatste['start_time']:%d-%m-%Y})")
-            fig = px.pie(lengths, names="Slag", values="banen", hole=0.4)
+            fig = px.pie(lengths, names="Slag", values="banen", hole=0.4,
+                         color="Slag", color_discrete_map=STROKE_COLORS)
             fig.update_traces(hovertemplate="%{label}: %{value} banen (%{percent})<extra></extra>")
             chart(fig)
 
@@ -960,7 +1013,7 @@ with tab_lichaam:
             fig = px.line(combo, x="measured_on", y="index", color="reeks", markers=True,
                           labels={"measured_on": "Datum", "index": "Index (eerste = 100)",
                                   "reeks": "Maat"})
-            fig.add_hline(y=100, line_dash="dot", line_color="rgba(150,150,150,0.6)")
+            fig.add_hline(y=100, line_dash="dot", line_color=with_alpha(PAL["muted"], 0.6))
             fig.update_traces(hovertemplate="%{fullData.name}: %{y:.1f}<extra></extra>")
             fig.update_layout(hovermode="x unified")
             fig.update_xaxes(hoverformat="%d-%m-%Y")

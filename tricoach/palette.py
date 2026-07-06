@@ -25,6 +25,10 @@ SEQ_BLUE = [
 _LICHT = {
     "sport": {"Hardlopen": "#e34948", "Fietsen": "#2a78d6", "Zwemmen": "#1baf7a"},
     "zones": ["#1c5cab", "#008300", "#eda100", "#eb6834", "#b93534"],
+    # Algemene categorische reeks (vaste volgorde, nooit cyclen) voor
+    # categorieën zónder eigen betekeniskleur, zoals zwemslagen.
+    "cats": ["#2a78d6", "#1baf7a", "#eda100", "#008300",
+             "#4a3aa7", "#e34948", "#e87ba4", "#eb6834"],
     "seq": SEQ_BLUE,
     "ink": "#0b0b0b",
     "muted": "#898781",
@@ -36,6 +40,8 @@ _LICHT = {
 _DONKER = {
     "sport": {"Hardlopen": "#e66767", "Fietsen": "#3987e5", "Zwemmen": "#199e70"},
     "zones": ["#3987e5", "#008300", "#c98500", "#d95926", "#e66767"],
+    "cats": ["#3987e5", "#199e70", "#c98500", "#008300",
+             "#9085e9", "#e66767", "#d55181", "#d95926"],
     "seq": SEQ_BLUE,
     "ink": "#ffffff",
     "muted": "#898781",
@@ -48,3 +54,10 @@ _DONKER = {
 def get_palette(mode: str | None) -> dict:
     """Palet voor de gevraagde modus; alles behalve "dark" geeft licht."""
     return _DONKER if mode == "dark" else _LICHT
+
+
+def with_alpha(hex_color: str, alpha: float) -> str:
+    """'#rrggbb' -> 'rgba(r,g,b,a)' voor transparante vlakken en banden."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
