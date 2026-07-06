@@ -522,9 +522,9 @@ with tab_overzicht:
             "uren": st.column_config.TextColumn("Uren"),
             "delta_uren": st.column_config.TextColumn(
                 "Δ uren", help="Verschil in trainingsuren met de week eronder."),
-            "uren_swimming": st.column_config.TextColumn("🏊"),
-            "uren_cycling": st.column_config.TextColumn("🚴"),
-            "uren_running": st.column_config.TextColumn("🏃"),
+            "uren_swimming": st.column_config.TextColumn("🏊 Zwemmen"),
+            "uren_cycling": st.column_config.TextColumn("🚴 Fietsen"),
+            "uren_running": st.column_config.TextColumn("🏃 Lopen"),
             "km": st.column_config.NumberColumn("Km totaal", format="%.0f"),
             "trimp": st.column_config.NumberColumn(
                 "TRIMP", format="%.0f",
