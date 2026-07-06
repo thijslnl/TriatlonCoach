@@ -54,6 +54,14 @@ from tricoach.llm.log import usage_summary
 from tricoach.llm.observations import session_observation
 from tricoach.lthr import append_entry as lthr_append, load_history as lthr_history
 from tricoach.palette import get_palette
+from tricoach.viz import (
+    PLOTLY_CONFIG,
+    date_xaxis,
+    pace_as_time,
+    pace_axis,
+    pad_single_point,
+    style_fig,
+)
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
 from tricoach.storage import (
@@ -95,32 +103,9 @@ STROKE_NL = {
 }
 
 
-def style_fig(fig, show_legend: bool = True):
-    """Huisstijl voor alle grafieken: legenda horizontaal ónder de grafiek."""
-    fig.update_layout(
-        legend=dict(orientation="h", yanchor="top", y=-0.22, x=0, title=None),
-        showlegend=show_legend,
-        margin=dict(t=30, b=10, l=10, r=10),
-    )
-    return fig
-
-
-def date_xaxis(fig, dates):
-    """Nette datum-as: alleen dd-mm-jjjj, geen uur-ticks binnen de dag.
-
-    Bij weinig metingen zetten we de ticks precies op de meetdagen; bij veel
-    metingen laten we Plotly zelf nette dag/week/maand-labels kiezen.
-    """
-    uniek = pd.to_datetime(pd.Series(list(dates))).dt.normalize().drop_duplicates()
-    fig.update_xaxes(tickformat="%d-%m-%Y")
-    if 1 <= len(uniek) <= 15:
-        fig.update_xaxes(tickmode="array", tickvals=sorted(uniek))
-    return fig
-
-
-def pace_as_time(seconds: pd.Series) -> pd.Series:
-    """Tempo in seconden -> datetime, zodat de as nette M:SS-labels krijgt."""
-    return pd.to_datetime(seconds, unit="s")
+def chart(fig, show_legend: bool = True):
+    """Render een figuur in huisstijl, met de gedeelde modebar-config."""
+    st.plotly_chart(style_fig(fig, show_legend), width="stretch", config=PLOTLY_CONFIG)
 
 
 # Mini zoneverdeling-balk: 10 gekleurde blokjes per sessie, Z1..Z5 in oplopende
@@ -333,7 +318,7 @@ with tab_overzicht:
             labels={"week": "Week", "uren": "Uren", "sport": "Sport"},
         )
         fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.1f} uur<extra></extra>")
-        st.plotly_chart(style_fig(fig), width="stretch")
+        chart(fig)
 
     with col_rechts:
         st.subheader("Tijd in hartslagzones per week")
@@ -349,7 +334,7 @@ with tab_overzicht:
             labels={"week": "Week", "minuten": "Minuten", "zone": "Zone"},
         )
         fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.0f} min<extra></extra>")
-        st.plotly_chart(style_fig(fig), width="stretch")
+        chart(fig)
 
     st.subheader("Mijn hartslagzones & LTHR-ontwikkeling")
     st.caption(
@@ -390,7 +375,7 @@ with tab_overzicht:
         line_shape="hv", hovertemplate="LTHR: %{y} bpm<extra></extra>",
     ))
     fig.update_layout(yaxis_title="Hartslag (bpm)", xaxis_title="Datum")
-    st.plotly_chart(style_fig(fig), width="stretch")
+    chart(fig)
 
     st.subheader("Recente sessies")
     trend = aerobic_efficiency_trend(acts)
@@ -474,20 +459,16 @@ with tab_trends:
                 run_trend, x="start_time", y="tempo", markers=True,
                 labels={"start_time": "Datum", "tempo": "Tempo (min/km)"},
             )
-            fig.update_yaxes(tickformat="%M:%S", autorange="reversed")
+            pace_axis(fig)
             fig.update_traces(
                 marker=dict(size=11),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km<extra></extra>",
             )
             fig.update_layout(title="Hardlopen — tempo in zone 2 (sneller = hoger)")
-            if len(run_trend) == 1:  # bij één punt zoomt plotly extreem in
-                t = pd.Timestamp(run_trend["start_time"].iloc[0])
-                y = run_trend["tempo"].iloc[0]
-                fig.update_xaxes(range=[t - pd.Timedelta(days=4), t + pd.Timedelta(days=4)],
-                                 tickformat="%d-%m-%Y")
-                fig.update_yaxes(range=[y + pd.Timedelta(seconds=30),
-                                        y - pd.Timedelta(seconds=30)])
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            pad_single_point(fig, run_trend["start_time"],
+                             y_center=run_trend["tempo"].iloc[0],
+                             y_pad=pd.Timedelta(seconds=30), reversed_y=True)
+            chart(fig, show_legend=False)
         if 0 < len(run_trend) < n_runs:
             st.caption(
                 f"{n_runs - len(run_trend)} van je {n_runs} loopsessies is weggelaten: "
@@ -509,13 +490,9 @@ with tab_trends:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h<extra></extra>",
             )
             fig.update_layout(title="Fietsen — snelheid in zone 2")
-            if len(bike_trend) == 1:
-                t = pd.Timestamp(bike_trend["start_time"].iloc[0])
-                y = bike_trend["snelheid_kmh"].iloc[0]
-                fig.update_xaxes(range=[t - pd.Timedelta(days=4), t + pd.Timedelta(days=4)],
-                                 tickformat="%d-%m-%Y")
-                fig.update_yaxes(range=[y - 3, y + 3])
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            pad_single_point(fig, bike_trend["start_time"],
+                             y_center=bike_trend["snelheid_kmh"].iloc[0], y_pad=3)
+            chart(fig, show_legend=False)
         if 0 < len(bike_trend) < n_rides:
             st.caption(
                 f"{n_rides - len(bike_trend)} van je {n_rides} fietssessies is weggelaten: "
@@ -574,9 +551,9 @@ with tab_trends:
             )
             fig.update_traces(hovertemplate=hover)
             if soort == "tempo":
-                fig.update_yaxes(tickformat="%M:%S", autorange="reversed")
+                pace_axis(fig)
             fig.update_layout(title=titel)
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
 
 # --------------------------------------------------------------- voortgang --
 with tab_voortgang:
@@ -622,7 +599,7 @@ with tab_voortgang:
     fig.update_yaxes(title_text="Dag-TRIMP", row=2, col=1)
     fig.update_xaxes(title_text="Datum", row=2, col=1)
     fig.update_layout(height=520, hovermode="x unified")
-    st.plotly_chart(style_fig(fig), width="stretch")
+    chart(fig)
     st.caption(
         "Elke sessie krijgt een TRIMP-score uit de tijd per hartslagzone "
         "(zone 1 telt 1×, zone 5 telt 5× per minuut). De fitheidslijn moet "
@@ -656,11 +633,8 @@ with tab_voortgang:
                 marker=dict(size=11), line=dict(color=SPORT_COLORS[titel]),
                 hovertemplate="%{x|%d-%m-%Y} · EF %{y:.2f}<extra></extra>")
             fig.update_layout(title=f"{titel} — efficiency factor (hoger = beter)")
-            if len(ef_sport) == 1:
-                t = pd.Timestamp(ef_sport["start_time"].iloc[0])
-                fig.update_xaxes(range=[t - pd.Timedelta(days=4), t + pd.Timedelta(days=4)],
-                                 tickformat="%d-%m-%Y")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            pad_single_point(fig, ef_sport["start_time"])
+            chart(fig, show_legend=False)
 
     dec = decoupling(conn, acts)
     if not dec.empty:
@@ -680,7 +654,7 @@ with tab_voortgang:
                       annotation_text="richtwaarde 5%")
         fig.update_traces(hovertemplate="%{x} · %{fullData.name}: %{y:.1f}%<extra></extra>")
         fig.update_layout(title="HR-decoupling per sessie (lager = betere aerobe basis)")
-        st.plotly_chart(style_fig(fig), width="stretch")
+        chart(fig)
 
     st.divider()
     # -- Racevoorspelling -----------------------------------------------------
@@ -726,11 +700,8 @@ with tab_voortgang:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.0f}% crawl<extra></extra>")
             fig.update_yaxes(range=[0, 100])
             fig.update_layout(title="Aandeel borstcrawl per sessie (doel: richting 100%)")
-            if len(aandeel) == 1:
-                t = pd.Timestamp(aandeel["start_time"].iloc[0])
-                fig.update_xaxes(range=[t - pd.Timedelta(days=4), t + pd.Timedelta(days=4)],
-                                 tickformat="%d-%m-%Y")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            pad_single_point(fig, aandeel["start_time"])
+            chart(fig, show_legend=False)
         if not swolf_slag.empty:
             swolf_slag = swolf_slag.copy()
             swolf_slag["Slag"] = swolf_slag["slag"].map(lambda s: STROKE_NL.get(s, s))
@@ -742,11 +713,8 @@ with tab_voortgang:
                 marker=dict(size=11),
                 hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: SWOLF %{y:.0f}<extra></extra>")
             fig.update_layout(title="SWOLF per slagtype (lager = efficiënter)")
-            if swolf_slag["start_time"].nunique() == 1:
-                t = pd.Timestamp(swolf_slag["start_time"].iloc[0])
-                fig.update_xaxes(range=[t - pd.Timedelta(days=4), t + pd.Timedelta(days=4)],
-                                 tickformat="%d-%m-%Y")
-            st.plotly_chart(style_fig(fig), width="stretch")
+            pad_single_point(fig, swolf_slag["start_time"])
+            chart(fig)
 
 # ------------------------------------------------------- discipline-tabs --
 with tab_lopen:
@@ -765,7 +733,7 @@ with tab_lopen:
                 labels={"start_time": "Datum", "tempo": "Tempo (min/km)",
                         "avg_hr": "Gem. HR"},
             )
-            fig.update_yaxes(tickformat="%M:%S", autorange="reversed")
+            pace_axis(fig)
             fig.update_traces(
                 mode="lines+markers",
                 marker=dict(size=14, line=dict(width=1, color="rgba(255,255,255,0.7)")),
@@ -773,7 +741,7 @@ with tab_lopen:
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km · HR %{marker.color}<extra></extra>",
             )
             fig.update_layout(title="Tempo per sessie (kleur = gemiddelde hartslag)")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
         with c2:
             fig = px.line(
                 runs, x="start_time", y="cadans_spm", markers=True,
@@ -784,7 +752,7 @@ with tab_lopen:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} stappen/min<extra></extra>",
             )
             fig.update_layout(title="Cadans per sessie")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
 
 with tab_fietsen:
     rides = acts[acts["sport"] == "cycling"].sort_values("start_time")
@@ -808,7 +776,7 @@ with tab_fietsen:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h · HR %{marker.color}<extra></extra>",
             )
             fig.update_layout(title="Snelheid per rit (kleur = gemiddelde hartslag)")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
         with c2:
             fig = px.bar(
                 rides, x="start_time", y="total_ascent",
@@ -816,7 +784,7 @@ with tab_fietsen:
             )
             fig.update_traces(hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} m<extra></extra>")
             fig.update_layout(title="Hoogtemeters per rit")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
 
 with tab_zwemmen:
     swim = swim_per_session(conn, acts)
@@ -834,7 +802,7 @@ with tab_zwemmen:
                 hovertemplate="%{x|%d-%m-%Y} · SWOLF %{y:.0f}<extra></extra>",
             )
             fig.update_layout(title="Gemiddelde SWOLF per sessie (lager = efficiënter)")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
         with c2:
             swim = swim.copy()
             swim["tempo"] = pace_as_time(swim["tempo_s_per_100m"])
@@ -842,13 +810,13 @@ with tab_zwemmen:
                 swim, x="start_time", y="tempo", markers=True,
                 labels={"start_time": "Datum", "tempo": "Tempo (min/100m)"},
             )
-            fig.update_yaxes(tickformat="%M:%S", autorange="reversed")
+            pace_axis(fig)
             fig.update_traces(
                 marker=dict(size=11),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} /100m<extra></extra>",
             )
             fig.update_layout(title="Tempo per 100 meter (sneller = hoger)")
-            st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+            chart(fig, show_legend=False)
 
         # Slagverdeling van de laatste zwemsessie.
         laatste = acts[acts["sport"] == "swimming"].iloc[0]
@@ -861,7 +829,7 @@ with tab_zwemmen:
             st.subheader(f"Slagverdeling laatste sessie ({laatste['start_time']:%d-%m-%Y})")
             fig = px.pie(lengths, names="Slag", values="banen", hole=0.4)
             fig.update_traces(hovertemplate="%{label}: %{value} banen (%{percent})<extra></extra>")
-            st.plotly_chart(style_fig(fig), width="stretch")
+            chart(fig)
 
 # ----------------------------------------------------------------- lichaam --
 with tab_lichaam:
@@ -992,10 +960,8 @@ with tab_lichaam:
                                   hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}<extra></extra>")
                 fig.update_layout(title=titel)
                 date_xaxis(fig, serie["measured_on"])
-                if len(serie) == 1:
-                    t = pd.Timestamp(serie["measured_on"].iloc[0])
-                    fig.update_xaxes(range=[t - pd.Timedelta(days=7), t + pd.Timedelta(days=7)])
-                st.plotly_chart(style_fig(fig, show_legend=False), width="stretch")
+                pad_single_point(fig, serie["measured_on"], days=7)
+                chart(fig, show_legend=False)
 
         # -- Gecombineerd (genormaliseerd) ----------------------------------
         combo = body.normalized_trends(sel, body.TREND_FIELDS)
@@ -1011,7 +977,7 @@ with tab_lichaam:
             fig.update_layout(hovermode="x unified")
             fig.update_xaxes(hoverformat="%d-%m-%Y")
             date_xaxis(fig, combo["measured_on"])
-            st.plotly_chart(style_fig(fig), width="stretch")
+            chart(fig)
 
         # -- Kruising met trainingsdata -------------------------------------
         kruising = body.weight_vs_cycling(conn, acts)
@@ -1036,7 +1002,7 @@ with tab_lichaam:
                 yaxis2=dict(title="Fiets-km/week", overlaying="y", side="right", showgrid=False),
                 xaxis_title="Week",
             )
-            st.plotly_chart(style_fig(fig), width="stretch")
+            chart(fig)
 
     st.divider()
     log_path = MEMORY_DIR / "lichaamssamenstelling.md"
