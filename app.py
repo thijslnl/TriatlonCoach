@@ -53,6 +53,7 @@ from tricoach.llm import LLMRouter
 from tricoach.llm.log import usage_summary
 from tricoach.llm.observations import session_observation
 from tricoach.lthr import append_entry as lthr_append, load_history as lthr_history
+from tricoach.palette import get_palette
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
 from tricoach.storage import (
@@ -75,7 +76,10 @@ MEMORY_DIR = resolve_path(config, "memory_dir")
 TZ = "Europe/Amsterdam"  # Garmin slaat tijden op in UTC; tonen in lokale tijd
 
 # Vaste kleuren zodat sporten en zones in elke grafiek hetzelfde ogen.
-SPORT_COLORS = {"Hardlopen": "#e45756", "Fietsen": "#4c78a8", "Zwemmen": "#72b7b2"}
+# Het palet komt uit tricoach/palette.py (gevalideerd, licht + donker) en
+# volgt het actieve Streamlit-thema.
+PAL = get_palette(getattr(getattr(st.context, "theme", None), "type", "light"))
+SPORT_COLORS = PAL["sport"]
 ZONE_LABELS = {
     "Z1": f"Zone 1 (< {BOUNDS[0]})",
     "Z2": f"Zone 2 ({BOUNDS[0]}–{BOUNDS[1]})",
@@ -83,11 +87,7 @@ ZONE_LABELS = {
     "Z4": f"Zone 4 ({BOUNDS[2]}–{BOUNDS[3]})",
     "Z5": f"Zone 5 (> {BOUNDS[3]})",
 }
-ZONE_COLORS = {
-    ZONE_LABELS["Z1"]: "#b8d4e8", ZONE_LABELS["Z2"]: "#54a24b",
-    ZONE_LABELS["Z3"]: "#eeca3b", ZONE_LABELS["Z4"]: "#f58518",
-    ZONE_LABELS["Z5"]: "#e45756",
-}
+ZONE_COLORS = dict(zip(ZONE_LABELS.values(), PAL["zones"]))
 STROKE_NL = {
     "breaststroke": "Schoolslag", "freestyle": "Borstcrawl",
     "backstroke": "Rugslag", "butterfly": "Vlinderslag",
@@ -386,7 +386,7 @@ with tab_overzicht:
             hovertemplate=f"{label}: tot %{{y}} bpm<extra></extra>",
         ))
     fig.add_trace(go.Scatter(
-        x=dates, y=lthrs, name="LTHR", line=dict(color="white", dash="dash", width=2),
+        x=dates, y=lthrs, name="LTHR", line=dict(color=PAL["ink"], dash="dash", width=2),
         line_shape="hv", hovertemplate="LTHR: %{y} bpm<extra></extra>",
     ))
     fig.update_layout(yaxis_title="Hartslag (bpm)", xaxis_title="Datum")
