@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from tricoach.formatting import derive_speed_ms
-from tricoach.storage import load_records
+from tricoach.storage import load_lengths, load_records
 
 
 def swim_speed_ms(conn: sqlite3.Connection, act: pd.Series) -> float | None:
@@ -238,6 +238,67 @@ def readiness(acts: pd.DataFrame, race: dict | None = None) -> list[tuple[str, s
                 f"({'ruim boven' if langste_loop >= afst['run_m'] else 'onder'} "
                 f"de {afst['run_m'] / 1000:.0f} km van de race)."))
     return out
+
+
+def css_estimate(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict | None:
+    """Critical Swim Speed (CSS) geschat uit de trainingsdata.
+
+    Zoekt over alle zwemsessies de snelste écht aaneengesloten crawlreeks
+    van 400 m en van 200 m. Een reeks telt alleen als de banen direct op
+    elkaar volgen: een andere slag of een rustpauze (> ~15 s gat tussen het
+    einde van een baan en de start van de volgende) breekt hem. De tijd is
+    kloktijd van start eerste tot einde laatste baan — keerpunten tellen dus
+    mee, rust aan de kant niet (die breekt de reeks). CSS-tempo per 100 m =
+    (t400 − t200) / 2 — het tempo dat je in theorie lang kunt volhouden en
+    de basis voor zwemzones.
+
+    Vereist de per-baan-starttijd (kolom ``start_time``, opgeslagen sinds
+    juli 2026): zonder die tijden zijn rustpauzes tussen banen onzichtbaar en
+    zou de schatting veel te snel uitvallen. Sessies zonder starttijden
+    worden overgeslagen; geeft None zolang er geen bruikbare reeks is.
+    """
+    max_gat_s = 15.0
+    swims = acts[acts["sport"] == "swimming"]
+    beste: dict[int, float] = {}
+    for _, act in swims.iterrows():
+        pool = act.get("pool_length")
+        if pool is None or pd.isna(pool) or pool <= 0:
+            pool = 25.0
+        lengths = load_lengths(conn, act["activity_key"])
+        if lengths.empty or "start_time" not in lengths:
+            continue
+        lengths = lengths.dropna(subset=["start_time", "total_timer_time"])
+        lengths = lengths[lengths["start_time"].astype(str).str.lower() != "none"]
+        if lengths.empty:
+            continue
+        starts = pd.to_datetime(lengths["start_time"]).tolist()
+        duren = lengths["total_timer_time"].astype(float).tolist()
+        slagen = lengths["swim_stroke"].tolist()
+        for afstand in (400, 200):
+            n = int(round(afstand / pool))
+            reeks: list[tuple[pd.Timestamp, pd.Timestamp]] = []  # (start, eind)
+            for start, duur, slag in zip(starts, duren, slagen):
+                eind = start + pd.Timedelta(seconds=duur)
+                onderbroken = (
+                    slag != "freestyle"
+                    or (reeks and (start - reeks[-1][1]).total_seconds() > max_gat_s)
+                )
+                if onderbroken:
+                    reeks = []
+                if slag != "freestyle":
+                    continue
+                reeks.append((start, eind))
+                if len(reeks) >= n:
+                    venster = reeks[-n:]
+                    kloktijd = (venster[-1][1] - venster[0][0]).total_seconds()
+                    if afstand not in beste or kloktijd < beste[afstand]:
+                        beste[afstand] = kloktijd
+    if 400 not in beste or 200 not in beste:
+        return None
+    dt = beste[400] - beste[200]
+    if dt <= 0:
+        return None
+    return {"t400": beste[400], "t200": beste[200], "css_per_100m": dt / 2}
 
 
 def race_prediction_history(conn: sqlite3.Connection, acts: pd.DataFrame,

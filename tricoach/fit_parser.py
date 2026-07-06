@@ -43,7 +43,11 @@ RECORD_FIELDS = {
 SEMICIRCLE_TO_DEGREES = 180.0 / 2**31
 
 # Velden per baan bij zwemmen.
-LENGTH_FIELDS = ["timestamp", "total_timer_time", "total_strokes", "swim_stroke", "length_type"]
+# start_time is essentieel naast timestamp: alle banen van een sessie delen
+# (in de praktijk) dezelfde timestamp, alleen start_time maakt rustpauzes
+# tussen banen zichtbaar (nodig voor o.a. de CSS-schatting).
+LENGTH_FIELDS = ["timestamp", "start_time", "total_timer_time", "total_strokes",
+                 "swim_stroke", "length_type"]
 
 
 @dataclass

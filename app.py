@@ -23,6 +23,8 @@ from tricoach.advice import generate_advice, generate_insights, last_advice, las
 from tricoach.analysis import (
     aerobic_efficiency_trend,
     pace_at_hr,
+    stroke_distribution,
+    swim_length_matrix,
     swim_per_session,
     weekly_intensity_share,
     weekly_totals,
@@ -43,6 +45,7 @@ from tricoach.formatting import (
 )
 from tricoach.progress import (
     acwr_status,
+    css_estimate,
     decoupling,
     efficiency_factor,
     load_curves,
@@ -1082,6 +1085,24 @@ with tab_zwemmen:
     if swim.empty:
         st.info("Nog geen zwemsessies.")
     else:
+        css = css_estimate(conn, acts)
+        if css:
+            m1, m2, m3 = st.columns(3)
+            css_s = css["css_per_100m"]
+            m1.metric("CSS (kritieke zwemsnelheid)",
+                      f"{int(css_s // 60)}:{int(css_s % 60):02d}/100m",
+                      help="Geschat uit je snelste aaneengesloten 400 m en 200 m "
+                           "crawl: (t400 − t200) / 2. Dit tempo kun je in theorie "
+                           "lang volhouden — rustige banen zwem je erboven (langzamer), "
+                           "intervallen eromheen.")
+            m2.metric("Snelste 400 m crawl", fmt_duration(css["t400"]))
+            m3.metric("Snelste 200 m crawl", fmt_duration(css["t200"]))
+        else:
+            st.caption(
+                "💡 Vanaf je volgende zwem-upload verschijnt hier je **CSS** "
+                "(kritieke zwemsnelheid): daarvoor zijn per-baan-starttijden "
+                "nodig die pas sinds deze versie worden opgeslagen."
+            )
         c1, c2 = st.columns(2)
         with c1:
             fig = px.line(
@@ -1106,21 +1127,53 @@ with tab_zwemmen:
                 marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} /100m<extra></extra>",
             )
+            if css:
+                css_y = pace_as_time(pd.Series([css["css_per_100m"]])).iloc[0]
+                fig.update_traces(name="Per sessie", showlegend=True)
+                fig.add_scatter(
+                    x=[swim["start_time"].min(), swim["start_time"].max()],
+                    y=[css_y, css_y], mode="lines", name="CSS",
+                    line=dict(color=PAL["ref_line"], dash="dash", width=2),
+                    hoverinfo="skip")
             fig.update_layout(title="Tempo per 100 meter (sneller = hoger)")
+            chart(fig, show_legend=css is not None)
+
+        st.subheader("Tempo per baan")
+        st.caption(
+            "Elke rij is een sessie, elke cel een baan: donkerder = langzamer. "
+            "Zo zie je in één blik waar het tempo in een sessie wegzakte — en of "
+            "dat punt per sessie later komt te liggen."
+        )
+        matrix = swim_length_matrix(conn, acts)
+        if matrix.empty:
+            st.info("Nog geen baandata.")
+        else:
+            matrix.index = [f"{d:%d-%m-%Y}" for d in matrix.index]
+            fig = px.imshow(
+                matrix, aspect="auto", color_continuous_scale=PAL["seq"],
+                labels=dict(x="Baan", y="Sessie", color="s/baan"),
+            )
+            fig.update_traces(
+                hovertemplate="%{y} · baan %{x}: %{z:.0f} s<extra></extra>")
             chart(fig, show_legend=False)
 
-        # Slagverdeling van de laatste zwemsessie.
-        laatste = acts[acts["sport"] == "swimming"].iloc[0]
-        lengths = pd.read_sql_query(
-            "SELECT swim_stroke, COUNT(*) AS banen FROM lengths "
-            "WHERE activity_key = ? GROUP BY swim_stroke",
-            conn, params=(laatste["activity_key"],))
-        if not lengths.empty:
-            lengths["Slag"] = lengths["swim_stroke"].map(stroke_label)
-            st.subheader(f"Slagverdeling laatste sessie ({laatste['start_time']:%d-%m-%Y})")
-            fig = px.pie(lengths, names="Slag", values="banen", hole=0.4,
-                         color="Slag", color_discrete_map=STROKE_COLORS)
-            fig.update_traces(hovertemplate="%{label}: %{value} banen (%{percent})<extra></extra>")
+        st.subheader("Slagverdeling per sessie")
+        verdeling = stroke_distribution(conn, acts)
+        if not verdeling.empty:
+            verdeling["Slag"] = verdeling["slag"].map(stroke_label)
+            verdeling["pct"] = (verdeling["banen"] / verdeling.groupby("start_time")
+                                ["banen"].transform("sum") * 100)
+            fig = px.bar(
+                verdeling, x="start_time", y="pct", color="Slag",
+                color_discrete_map=STROKE_COLORS, custom_data=["banen"],
+                labels={"start_time": "Datum", "pct": "Aandeel banen (%)", "Slag": ""},
+            )
+            fig.update_traces(
+                marker_line=dict(width=1, color=PAL["surface"]),
+                hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: %{y:.0f}% "
+                              "(%{customdata[0]} banen)<extra></extra>")
+            fig.update_layout(title="Aandeel per slagtype (doel: steeds meer borstcrawl)")
+            date_xaxis(fig, verdeling["start_time"])
             chart(fig)
 
 # ----------------------------------------------------------------- lichaam --

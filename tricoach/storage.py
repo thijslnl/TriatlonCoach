@@ -64,6 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_records_key ON records(activity_key);
 CREATE TABLE IF NOT EXISTS lengths (
     activity_key     TEXT NOT NULL REFERENCES activities(activity_key),
     timestamp        TEXT,
+    start_time       TEXT,
     total_timer_time REAL,
     total_strokes    INTEGER,
     swim_stroke      TEXT
@@ -100,11 +101,15 @@ _ADDED_COLUMNS = {
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Voeg ontbrekende kolommen toe aan een al bestaande activities-tabel."""
+    """Voeg ontbrekende kolommen toe aan al bestaande tabellen."""
     have = {row[1] for row in conn.execute("PRAGMA table_info(activities)")}
     for name, decl in _ADDED_COLUMNS.items():
         if name not in have:
             conn.execute(f"ALTER TABLE activities ADD COLUMN {name} {decl}")
+    have_lengths = {row[1] for row in conn.execute("PRAGMA table_info(lengths)")}
+    if have_lengths and "start_time" not in have_lengths:
+        # Per-baan-starttijd (sinds de CSS-schatting); oude rijen blijven NULL.
+        conn.execute("ALTER TABLE lengths ADD COLUMN start_time TEXT")
     conn.commit()
 
 
@@ -208,8 +213,13 @@ def save_activity(
         df = act.lengths.copy()
         df["activity_key"] = act.activity_key
         df["timestamp"] = df["timestamp"].astype(str)
+        if "start_time" not in df:
+            df["start_time"] = None
+        else:
+            df["start_time"] = df["start_time"].map(
+                lambda v: str(v) if v is not None else None)
         df["swim_stroke"] = df["swim_stroke"].astype(str)
-        df[["activity_key", "timestamp", "total_timer_time",
+        df[["activity_key", "timestamp", "start_time", "total_timer_time",
             "total_strokes", "swim_stroke"]].to_sql(
             "lengths", conn, if_exists="append", index=False)
 

@@ -199,6 +199,43 @@ def aerobic_efficiency_trend(
     return out
 
 
+def swim_length_matrix(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
+    """Tijd per baan per zwemsessie als matrix voor een heatmap.
+
+    Rijen: sessies (index = startdatum), kolommen: baannummer (1..n), waarde:
+    seconden per baan. Kortere sessies krijgen NaN in de staart.
+    """
+    swims = activities[activities["sport"] == "swimming"].sort_values("start_time")
+    rows = {}
+    for _, act in swims.iterrows():
+        lengths = pd.read_sql_query(
+            "SELECT total_timer_time FROM lengths WHERE activity_key = ? "
+            "ORDER BY timestamp", conn, params=(act["activity_key"],))
+        if lengths.empty:
+            continue
+        rows[act["start_time"]] = lengths["total_timer_time"].reset_index(drop=True)
+    if not rows:
+        return pd.DataFrame()
+    matrix = pd.DataFrame(rows).T
+    matrix.columns = matrix.columns + 1  # baannummers vanaf 1
+    return matrix
+
+
+def stroke_distribution(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
+    """Banen per slagtype per zwemsessie (lange vorm: start_time, slag, banen)."""
+    swims = activities[activities["sport"] == "swimming"].sort_values("start_time")
+    rows = []
+    for _, act in swims.iterrows():
+        lengths = pd.read_sql_query(
+            "SELECT swim_stroke, COUNT(*) AS banen FROM lengths "
+            "WHERE activity_key = ? GROUP BY swim_stroke",
+            conn, params=(act["activity_key"],))
+        for _, r in lengths.iterrows():
+            rows.append({"start_time": act["start_time"],
+                         "slag": r["swim_stroke"], "banen": int(r["banen"])})
+    return pd.DataFrame(rows)
+
+
 def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
     """SWOLF en tempo per zwemsessie, voor de zwemtrend-grafiek."""
     swims = activities[activities["sport"] == "swimming"].copy()
