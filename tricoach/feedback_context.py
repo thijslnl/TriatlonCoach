@@ -82,8 +82,8 @@ def _note(row: pd.Series) -> str | None:
 
 # ------------------------------------------------------------ huidige sessie --
 
-def hr_drift(records: pd.DataFrame) -> str | None:
-    """Gemiddelde hartslag eerste helft vs tweede helft, als tekstregel.
+def hr_drift_values(records: pd.DataFrame) -> tuple[float, float] | None:
+    """Gemiddelde hartslag van de eerste en tweede helft, als getallenpaar.
 
     De belangrijkste vermoeidheids-/herstelmaat bij lopen en fietsen: loopt
     de hartslag in de tweede helft op bij gelijk werk, dan sluipt er
@@ -97,38 +97,64 @@ def hr_drift(records: pd.DataFrame) -> str | None:
     mid = df["timestamp"].iloc[0] + (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]) / 2
     first = df.loc[df["timestamp"] <= mid, "heart_rate"].mean()
     second = df.loc[df["timestamp"] > mid, "heart_rate"].mean()
+    return float(first), float(second)
+
+
+def hr_drift(records: pd.DataFrame) -> str | None:
+    """Hartslag eerste helft vs tweede helft als tekstregel (LLM-context)."""
+    helften = hr_drift_values(records)
+    if helften is None:
+        return None
+    first, second = helften
     return (
         f"eerste helft gem. HR {first:.0f}, tweede helft gem. HR {second:.0f} "
         f"({second - first:+.0f} slagen)"
     )
 
 
-def _run_splits(records: pd.DataFrame, max_km: int = 25) -> str | None:
-    """Tempo-splits per kilometer (met HR per split) uit de seconde-data."""
+def run_splits_df(records: pd.DataFrame, max_km: int = 25) -> pd.DataFrame:
+    """Kilometersplits uit de seconde-data: km, duur_s en gem_hr per split.
+
+    Leeg DataFrame als er geen volledige kilometer in de sessie zit.
+    """
     if records.empty or "distance_m" not in records:
-        return None
+        return pd.DataFrame()
     df = records.dropna(subset=["distance_m", "timestamp"]).sort_values("timestamp")
     if df.empty or df["distance_m"].max() < 1000:
-        return None
+        return pd.DataFrame()
 
     dist = df["distance_m"].to_numpy(dtype=float)
     times = df["timestamp"].to_numpy()
     hrs = df["heart_rate"].to_numpy(dtype=float) if "heart_rate" in df else None
 
-    regels, prev = [], 0
+    rows, prev = [], 0
     for k in range(1, min(int(dist[-1] // 1000), max_km) + 1):
         idx = int(np.searchsorted(dist, k * 1000))
         if idx >= len(dist):
             break
-        seg_s = (times[idx] - times[prev]) / np.timedelta64(1, "s")
-        regel = f"- km {k}: {fmt_duration(seg_s)}"
+        seg_s = float((times[idx] - times[prev]) / np.timedelta64(1, "s"))
+        hr = None
         if hrs is not None:
             seg_hr = pd.Series(hrs[prev:idx + 1]).dropna()
             if not seg_hr.empty:
-                regel += f" bij HR gem {seg_hr.mean():.0f}"
-        regels.append(regel)
+                hr = float(seg_hr.mean())
+        rows.append({"km": k, "duur_s": seg_s, "gem_hr": hr})
         prev = idx
-    return "\n".join(regels) if regels else None
+    return pd.DataFrame(rows)
+
+
+def _run_splits(records: pd.DataFrame, max_km: int = 25) -> str | None:
+    """Tempo-splits per kilometer (met HR per split), als tekst (LLM-context)."""
+    splits = run_splits_df(records, max_km)
+    if splits.empty:
+        return None
+    regels = []
+    for _, r in splits.iterrows():
+        regel = f"- km {int(r['km'])}: {fmt_duration(r['duur_s'])}"
+        if r["gem_hr"] is not None and not pd.isna(r["gem_hr"]):
+            regel += f" bij HR gem {r['gem_hr']:.0f}"
+        regels.append(regel)
+    return "\n".join(regels)
 
 
 def _bike_detail(records: pd.DataFrame, summary: dict) -> str | None:

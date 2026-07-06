@@ -69,9 +69,12 @@ from tricoach.viz import (
 )
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
+from tricoach.feedback_context import hr_drift_values, run_splits_df
 from tricoach.storage import (
     connect,
     load_activities,
+    load_lengths,
+    load_records,
     recompute_zones,
     swim_active_seconds,
 )
@@ -291,10 +294,10 @@ def render_upload_feedback():
 
 render_upload_feedback()
 
-(tab_overzicht, tab_trends, tab_voortgang, tab_lopen, tab_fietsen, tab_zwemmen,
- tab_lichaam, tab_coach, tab_chat, tab_log, tab_settings) = st.tabs(
-    ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🏃 Lopen", "🚴 Fietsen", "🏊 Zwemmen",
-     "🧍 Lichaam", "🧠 Coach", "💬 Chat", "📖 Logboek", "⚙️ Instellingen"]
+(tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
+ tab_zwemmen, tab_lichaam, tab_coach, tab_chat, tab_log, tab_settings) = st.tabs(
+    ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
+     "🏊 Zwemmen", "🧍 Lichaam", "🧠 Coach", "💬 Chat", "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -828,6 +831,138 @@ with tab_voortgang:
             fig.update_layout(title="SWOLF per slagtype (lager = efficiënter)")
             pad_single_point(fig, swolf_slag["start_time"])
             chart(fig)
+
+# ------------------------------------------------------------------ sessie --
+with tab_sessie:
+    st.subheader("🔍 Sessie-detail")
+    st.caption(
+        "Kies een sessie voor het verloop bínnen de training: hartslag met "
+        "zonebanden, tempo/snelheid en hoogte, plus kilometersplits of banen."
+    )
+    keuze_df = acts.sort_values("start_time", ascending=False)
+    sessie_labels = {
+        r["activity_key"]: (
+            f"{r['start_time']:%d-%m-%Y %H:%M} · {r['Sport']}"
+            + (f" · {r['distance_m'] / 1000:.1f} km" if pd.notna(r["distance_m"]) else "")
+        )
+        for _, r in keuze_df.iterrows()
+    }
+    gekozen = st.selectbox(
+        "Sessie", keuze_df["activity_key"].tolist(),
+        format_func=sessie_labels.get, label_visibility="collapsed",
+    )
+    sessie = keuze_df.loc[keuze_df["activity_key"] == gekozen].iloc[0]
+    is_zwem = sessie["sport"] == "swimming"
+    rec = pd.DataFrame() if is_zwem else load_records(conn, gekozen).sort_values("timestamp")
+    banen = load_lengths(conn, gekozen) if is_zwem else pd.DataFrame()
+
+    drift = hr_drift_values(rec) if not rec.empty else None
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Duur", fmt_duration(sessie["duration_s"]))
+    c2.metric("Afstand", f"{sessie['distance_m'] / 1000:.2f} km"
+              if pd.notna(sessie["distance_m"]) else GEEN_WAARDE)
+    c3.metric("Tempo / snelheid", veilig_cel(
+        sessie_tempo, sessie["sport"], sessie["distance_m"],
+        sessie["duration_s"], zwem_actief.get(gekozen)))
+    c4.metric("Gem. / max HR",
+              f"{sessie['avg_hr']:.0f} / {sessie['max_hr']:.0f}"
+              if pd.notna(sessie["avg_hr"]) and pd.notna(sessie["max_hr"]) else GEEN_WAARDE)
+    c5.metric("HR-drift", f"{drift[1] - drift[0]:+.0f} bpm" if drift else GEEN_WAARDE,
+              help="Gemiddelde hartslag van de tweede helft minus de eerste helft. "
+                   "Duidelijk oplopend = vermoeidheid of een te hoog begintempo.")
+
+    if is_zwem:
+        if banen.empty:
+            st.info("Geen baandata voor deze sessie.")
+        else:
+            banen = banen.reset_index(drop=True)
+            banen["baan"] = banen.index + 1
+            banen["Slag"] = banen["swim_stroke"].map(stroke_label)
+            fig = px.bar(
+                banen, x="baan", y="total_timer_time", color="Slag",
+                color_discrete_map=STROKE_COLORS, custom_data=["total_strokes"],
+                labels={"baan": "Baan", "total_timer_time": "Tijd per baan (s)"},
+            )
+            fig.update_traces(
+                marker_line=dict(width=1, color=PAL["surface"]),
+                hovertemplate="baan %{x} · %{y:.0f} s · %{customdata[0]:.0f} slagen · "
+                              "%{fullData.name}<extra></extra>")
+            fig.update_layout(title="Baan voor baan (kleur = slagtype)")
+            chart(fig)
+            st.caption(
+                "Gelijkmatige balken = constant tempo. Worden de crawlbanen naar "
+                "het einde toe langzamer, dan zakt de techniek onder vermoeidheid in."
+            )
+    elif rec.empty or "heart_rate" not in rec or rec["heart_rate"].dropna().empty:
+        st.info("Geen seconde-data voor deze sessie.")
+    else:
+        rec = rec.dropna(subset=["timestamp"]).reset_index(drop=True)
+        rec["minuut"] = (rec["timestamp"] - rec["timestamp"].iloc[0]).dt.total_seconds() / 60
+        # Rollend gemiddelde van ~10 s tegen sensorruis; de records zijn ~1/s.
+        hr_glad = rec["heart_rate"].rolling(10, min_periods=1).mean()
+        snel_glad = rec["speed_ms"].rolling(10, min_periods=1).mean() \
+            if "speed_ms" in rec else pd.Series(dtype=float)
+        alt = rec["altitude_m"].rolling(10, min_periods=1).mean() \
+            if "altitude_m" in rec and rec["altitude_m"].notna().any() else pd.Series(dtype=float)
+        rijen = 2 + (0 if alt.empty else 1)
+
+        fig = make_subplots(rows=rijen, cols=1, shared_xaxes=True,
+                            row_heights=[0.4, 0.35, 0.25][:rijen],
+                            vertical_spacing=0.06)
+        # Zonebanden achter de hartslaglijn: in één blik zie je de zone.
+        onder = float(min(hr_glad.min(), BOUNDS[0] - 10))
+        boven = float(max(hr_glad.max() + 5, BOUNDS[3] + 5))
+        grenzen = [onder, *BOUNDS, boven]
+        for i in range(5):
+            fig.add_hrect(y0=grenzen[i], y1=grenzen[i + 1], line_width=0,
+                          fillcolor=with_alpha(PAL["zones"][i], 0.14), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=rec["minuut"], y=hr_glad, name="Hartslag",
+            line=dict(color=PAL["ink"], width=2),
+            hovertemplate="min %{x:.0f}: HR %{y:.0f}<extra></extra>"),
+            row=1, col=1)
+        fig.update_yaxes(title_text="HR (bpm)", range=[onder, boven], row=1, col=1)
+
+        if sessie["sport"] == "running":
+            geldig = snel_glad.where(snel_glad > 0.5)  # stilstand geeft oneindig tempo
+            fig.add_trace(go.Scatter(
+                x=rec["minuut"], y=pace_as_time(1000 / geldig), name="Tempo",
+                line=dict(color=SPORT_COLORS["Hardlopen"], width=2),
+                hovertemplate="min %{x:.0f}: %{y|%M:%S}/km<extra></extra>"),
+                row=2, col=1)
+            fig.update_yaxes(title_text="min/km", tickformat="%M:%S",
+                             autorange="reversed", row=2, col=1)
+        else:
+            fig.add_trace(go.Scatter(
+                x=rec["minuut"], y=snel_glad * 3.6, name="Snelheid",
+                line=dict(color=SPORT_COLORS["Fietsen"], width=2),
+                hovertemplate="min %{x:.0f}: %{y:.1f} km/h<extra></extra>"),
+                row=2, col=1)
+            fig.update_yaxes(title_text="km/h", row=2, col=1)
+
+        if not alt.empty:
+            fig.add_trace(go.Scatter(
+                x=rec["minuut"], y=alt, name="Hoogte",
+                line=dict(color=PAL["muted"], width=2),
+                hovertemplate="min %{x:.0f}: %{y:.0f} m<extra></extra>"),
+                row=3, col=1)
+            fig.update_yaxes(title_text="Hoogte (m)", row=3, col=1)
+
+        fig.update_xaxes(title_text="Minuten", row=rijen, col=1)
+        fig.update_layout(height=170 * rijen + 120, hovermode="x unified")
+        chart(fig)
+
+        if sessie["sport"] == "running":
+            splits = run_splits_df(rec)
+            if not splits.empty:
+                st.subheader("Kilometersplits")
+                splits = splits.copy()
+                splits["Tempo"] = splits["duur_s"].map(fmt_duration)
+                splits["Gem. HR"] = splits["gem_hr"].map(
+                    lambda v: GEEN_WAARDE if v is None or pd.isna(v) else f"{v:.0f}")
+                st.dataframe(
+                    splits[["km", "Tempo", "Gem. HR"]].rename(columns={"km": "Km"}),
+                    hide_index=True, width="stretch")
 
 # ------------------------------------------------------- discipline-tabs --
 with tab_lopen:
