@@ -4,7 +4,7 @@
 athlete:
   name: Thijs
   max_hr: 193
-  lthr: 171
+  lthr: 170
   zone_pct_lthr:
   - 0.8
   - 0.89
@@ -15,6 +15,9 @@ athlete:
 races:
 - name: Standaard triatlon
   date: 2027-05-01
+  swim_m: null
+  bike_m: null
+  run_m: null
   distances: 1,5km zwemmen / 40km fietsen / 10km lopen
   goal: Goed finishen (eerste race)
   target_time: ''
@@ -25,9 +28,6 @@ llm:
     timeout_s: 120
   anthropic:
     model: claude-sonnet-5
-    # Plafond ruim genoeg voor modellen met adaptief denken (Sonnet 5): het
-    # denkwerk telt mee in het budget; bij 2000 bleef er soms niets over voor
-    # het antwoord zelf. max_tokens is een plafond, geen kostenpost.
     max_tokens: 6000
     cost_per_mtok_input_usd: 3.0
     cost_per_mtok_output_usd: 15.0
