@@ -55,12 +55,22 @@ def _last_md_section(path: Path, heading_contains: str | None = None) -> str | N
     Met ``heading_contains`` wordt op een woord in de kopregel gefilterd —
     nodig sinds adviezen.md náást weekadviezen ook per-sessie 'Sessie-advies'-
     secties bevat (feedback-stap) en de weekadvies-weergave die moet overslaan.
+
+    Secties zonder echte inhoud (alleen de cursieve 'Gebaseerd op'-regel, een
+    restant van de lege-antwoord-bug) worden overgeslagen, zodat altijd het
+    laatste advies mét tekst wordt getoond.
     """
     if not path.exists():
         return None
     parts = path.read_text(encoding="utf-8").split("\n## ")[1:]
     if heading_contains:
         parts = [p for p in parts if heading_contains in p.splitlines()[0]]
+
+    def _heeft_inhoud(part: str) -> bool:
+        regels = [r.strip() for r in part.splitlines()[1:]]
+        return any(r and not (r.startswith("_") and r.endswith("_")) for r in regels)
+
+    parts = [p for p in parts if _heeft_inhoud(p)]
     return "## " + parts[-1] if parts else None
 
 
@@ -122,6 +132,14 @@ def generate_advice(router: LLMRouter, conn: sqlite3.Connection, memory_dir: Pat
     """Genereer een nieuw advies via de API en leg het vast in memory/adviezen.md."""
     context = build_context(conn, memory_dir)
     advies = router.ask("advice", context, system=SYSTEM)
+    if not advies.strip():
+        # Niet opslaan: een lege sectie in adviezen.md verdringt anders het
+        # laatste échte advies. Leeg antwoord = denkbudget op (max_tokens).
+        raise RuntimeError(
+            "Het model gaf een leeg antwoord terug (waarschijnlijk was het "
+            "token-budget op vóór het antwoord). Er is niets opgeslagen — "
+            "probeer het opnieuw of verhoog task_max_tokens.advice in config.yaml."
+        )
 
     path = memory_dir / "adviezen.md"
     if not path.exists():
@@ -180,6 +198,12 @@ def generate_insights(
         "langetermijnpatronen en geef je inzichten."
     )
     inzichten = router.ask("trends", context, system=INSIGHTS_SYSTEM)
+    if not inzichten.strip():
+        raise RuntimeError(
+            "Het model gaf een leeg antwoord terug (waarschijnlijk was het "
+            "token-budget op vóór het antwoord). Er is niets opgeslagen — "
+            "probeer het opnieuw of verhoog task_max_tokens.trends in config.yaml."
+        )
 
     path = memory_dir / "inzichten.md"
     bestaand = path.read_text(encoding="utf-8") if path.exists() else "# Inzichten\n"

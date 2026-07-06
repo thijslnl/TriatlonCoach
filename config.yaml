@@ -25,13 +25,18 @@ llm:
     timeout_s: 120
   anthropic:
     model: claude-sonnet-5
-    max_tokens: 2000
+    # Plafond ruim genoeg voor modellen met adaptief denken (Sonnet 5): het
+    # denkwerk telt mee in het budget; bij 2000 bleef er soms niets over voor
+    # het antwoord zelf. max_tokens is een plafond, geen kostenpost.
+    max_tokens: 6000
     cost_per_mtok_input_usd: 3.0
     cost_per_mtok_output_usd: 15.0
     task_models:
       feedback: claude-sonnet-5
     task_max_tokens:
       feedback: 6000
+      advice: 8000
+      trends: 6000
     model_prices:
       claude-sonnet-5:
         input: 3.0
