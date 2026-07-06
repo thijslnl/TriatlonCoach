@@ -240,6 +240,34 @@ def readiness(acts: pd.DataFrame, race: dict | None = None) -> list[tuple[str, s
     return out
 
 
+def race_prediction_history(conn: sqlite3.Connection, acts: pd.DataFrame,
+                            race: dict | None = None) -> pd.DataFrame:
+    """De racevoorspelling per week, herberekend met alleen de sessies tot en
+    met die week — zo zie je of de voorspelde racetijd de goede kant op gaat.
+
+    Geeft per weekeinde (zondag): datum, zwem, fiets, loop en totaal in
+    seconden (None waar toen nog te weinig data was).
+    """
+    if acts.empty:
+        return pd.DataFrame()
+    df = acts.sort_values("start_time")
+    weken = pd.date_range(
+        df["start_time"].min().normalize(), df["start_time"].max(),
+        freq="W-SUN", tz=df["start_time"].iloc[0].tz,
+    )
+    weken = weken.append(pd.DatetimeIndex([df["start_time"].max()]))
+    rows = []
+    for w in weken:
+        sub = df[df["start_time"] <= w]
+        if sub.empty:
+            continue
+        p = race_prediction(conn, sub, race)
+        rows.append({"datum": w.normalize(), "zwem": p["zwem"], "fiets": p["fiets"],
+                     "loop": p["loop"], "totaal": p["totaal"]})
+    out = pd.DataFrame(rows).drop_duplicates(subset="datum")
+    return out
+
+
 # ------------------------------------------------- records & zwemprogressie --
 
 def _fastest_window(records: pd.DataFrame, target_m: float) -> float | None:

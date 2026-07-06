@@ -50,6 +50,7 @@ from tricoach.progress import (
     progress_summary_text,
     race_distances,
     race_prediction,
+    race_prediction_history,
     readiness,
     swim_progression,
 )
@@ -796,6 +797,33 @@ with tab_voortgang:
     )
     for emoji, tekst in readiness(acts, race):
         st.markdown(f"{emoji} {tekst}")
+
+    hist = race_prediction_history(conn, acts, race)
+    if len(hist) >= 2:
+        naam = {"zwem": "Zwemmen", "fiets": "Fietsen", "loop": "Lopen", "totaal": "Totaal"}
+        kleuren = {"Zwemmen": SPORT_COLORS["Zwemmen"], "Fietsen": SPORT_COLORS["Fietsen"],
+                   "Lopen": SPORT_COLORS["Hardlopen"], "Totaal": PAL["ink"]}
+        lang = hist.melt(id_vars="datum", var_name="onderdeel",
+                         value_name="seconden").dropna(subset=["seconden"])
+        lang["onderdeel"] = lang["onderdeel"].map(naam)
+        lang["tijd"] = pace_as_time(lang["seconden"])
+        fig = px.line(
+            lang, x="datum", y="tijd", color="onderdeel", markers=True,
+            color_discrete_map=kleuren,
+            labels={"datum": "Datum", "tijd": "Geschatte tijd", "onderdeel": ""},
+        )
+        fig.update_yaxes(tickformat="%H:%M")
+        fig.update_traces(
+            marker=dict(size=9),
+            hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: %{y|%H:%M:%S}<extra></extra>")
+        fig.update_layout(title="Voorspelde racetijd over tijd (lager = beter)")
+        date_xaxis(fig, lang["datum"])
+        chart(fig)
+        st.caption(
+            "Elke punt is de voorspelling zoals die er die week uitzag, berekend "
+            "met alleen de trainingen tot dat moment. Een dalende lijn betekent: "
+            "je wordt sneller op de raceafstanden."
+        )
 
     st.divider()
     # -- Records & zwemprogressie ---------------------------------------------
