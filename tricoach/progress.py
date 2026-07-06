@@ -62,7 +62,9 @@ def load_curves(acts: pd.DataFrame) -> pd.DataFrame:
     """Dagelijkse fitheid (CTL) en vermoeidheid (ATL) als exponentieel
     voortschrijdende gemiddelden van de dagelijkse TRIMP.
 
-    Geeft een DataFrame per dag: datum, trimp, ctl, atl, acwr.
+    Geeft een DataFrame per dag: datum, trimp, ctl, atl, tsb, acwr. TSB
+    ("vorm") is fitheid minus vermoeidheid: positief = fris, sterk negatief =
+    diep in de vermoeidheid.
     """
     per_sessie = trimp_per_session(acts)
     per_dag = (
@@ -85,6 +87,7 @@ def load_curves(acts: pd.DataFrame) -> pd.DataFrame:
         atl.append(a)
 
     out = pd.DataFrame({"datum": dagen, "trimp": trimp.values, "ctl": ctl, "atl": atl})
+    out["tsb"] = out["ctl"] - out["atl"]
     out["acwr"] = np.where(out["ctl"] > 1, out["atl"] / out["ctl"], np.nan)
     return out
 

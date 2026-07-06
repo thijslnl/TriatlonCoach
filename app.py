@@ -58,6 +58,7 @@ from tricoach.lthr import append_entry as lthr_append, load_history as lthr_hist
 from tricoach.palette import get_palette, with_alpha
 from tricoach.viz import (
     PLOTLY_CONFIG,
+    add_race_marker,
     date_xaxis,
     pace_as_time,
     pace_axis,
@@ -606,38 +607,62 @@ with tab_voortgang:
               help="Verhouding vermoeidheid/fitheid (ACWR). 0,8–1,3 is een gezonde opbouw; "
                    "daarboven stijgt de belasting sneller dan je fitheid aankan.")
 
-    # Twee panelen met gedeelde datum-as: één zware sessie (TRIMP in de
+    # Drie panelen met gedeelde datum-as: één zware sessie (TRIMP in de
     # honderden) drukt anders de CTL/ATL-lijnen (tientallen) plat tegen de
-    # nullijn, waardoor je een 'snelle stijging' niet terugziet in de grafiek.
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.6, 0.4], vertical_spacing=0.06)
+    # nullijn. Het middelste paneel toont de ACWR-verhouding met de gezonde
+    # bandbreedte, zodat je niet alleen de status van vandaag ziet maar ook
+    # hoe je opbouw zich ontwikkelt.
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                        row_heights=[0.45, 0.25, 0.3], vertical_spacing=0.05)
     fig.add_trace(go.Scatter(
         x=curves["datum"], y=curves["ctl"], name="Fitheid (CTL)",
-        line=dict(color="#54a24b", width=3),
+        line=dict(color=PAL["cats"][3], width=3),
         hovertemplate="%{x|%d-%m-%Y}: fitheid %{y:.1f}<extra></extra>"),
         row=1, col=1)
     fig.add_trace(go.Scatter(
         x=curves["datum"], y=curves["atl"], name="Vermoeidheid (ATL)",
-        line=dict(color="#d97706", width=2, dash="dot"),
+        line=dict(color=PAL["cats"][7], width=2, dash="dot"),
         hovertemplate="%{x|%d-%m-%Y}: vermoeidheid %{y:.1f}<extra></extra>"),
         row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=curves["datum"], y=curves["tsb"], name="Vorm (TSB)",
+        line=dict(color=PAL["cats"][4], width=2, dash="dash"),
+        hovertemplate="%{x|%d-%m-%Y}: vorm %{y:.1f}<extra></extra>"),
+        row=1, col=1)
+    fig.add_hrect(y0=0.8, y1=1.3, line_width=0,
+                  fillcolor=with_alpha(PAL["zones"][1], 0.15),
+                  row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=curves["datum"], y=curves["acwr"], name="Opbouw (ACWR)",
+        line=dict(color=PAL["ink"], width=2),
+        hovertemplate="%{x|%d-%m-%Y}: ACWR %{y:.2f}<extra></extra>"),
+        row=2, col=1)
     fig.add_trace(go.Bar(
         x=curves["datum"], y=curves["trimp"], name="Dagbelasting (TRIMP)",
-        marker_color="rgba(120,120,140,0.45)",
+        marker_color=with_alpha(PAL["muted"], 0.45),
         hovertemplate="%{x|%d-%m-%Y}: %{y:.0f} TRIMP<extra></extra>"),
-        row=2, col=1)
-    fig.update_yaxes(title_text="Fitheid & vermoeidheid", rangemode="tozero",
-                     row=1, col=1)
-    fig.update_yaxes(title_text="Dag-TRIMP", row=2, col=1)
-    fig.update_xaxes(title_text="Datum", row=2, col=1)
-    fig.update_layout(height=520, hovermode="x unified")
+        row=3, col=1)
+    fig.update_yaxes(title_text="Fitheid, vermoeidheid & vorm", row=1, col=1)
+    fig.update_yaxes(title_text="ACWR", row=2, col=1)
+    fig.update_yaxes(title_text="Dag-TRIMP", row=3, col=1)
+    fig.update_xaxes(title_text="Datum", row=3, col=1)
+    fig.update_layout(height=640, hovermode="x unified")
+    # Racedatum alleen markeren als hij (bijna) in beeld is; anders rekt de
+    # lijn de hele datum-as op tot maanden zonder data.
+    race = (config.get("races") or [{}])[0]
+    if race.get("date"):
+        race_dt = pd.Timestamp(str(race["date"]))
+        if race_dt <= pd.Timestamp(curves["datum"].max()) + pd.Timedelta(days=45):
+            add_race_marker(fig, race_dt, race.get("name", "Race"), PAL["ref_line"])
     chart(fig)
     st.caption(
         "Elke sessie krijgt een TRIMP-score uit de tijd per hartslagzone "
         "(zone 1 telt 1×, zone 5 telt 5× per minuut). De fitheidslijn moet "
-        "richting september gestaag stijgen, met de vermoeidheidslijn er niet "
-        "te ver bovenuit. De eerste weken is dit beeld nog onbetrouwbaar — "
-        "de lijnen moeten 'inlopen'."
+        "gestaag stijgen, met de vermoeidheidslijn er niet te ver bovenuit. "
+        "**Vorm (TSB)** = fitheid − vermoeidheid: rond de race wil je dit "
+        "positief hebben. **ACWR** hoort in de groene band (0,8–1,3): "
+        "daarboven stijgt de belasting sneller dan je fitheid aankan. "
+        "De eerste weken is dit beeld nog onbetrouwbaar — de lijnen moeten 'inlopen'."
     )
 
     st.divider()
