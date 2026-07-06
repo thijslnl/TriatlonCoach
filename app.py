@@ -45,6 +45,7 @@ from tricoach.formatting import (
 )
 from tricoach.progress import (
     acwr_status,
+    best_efforts,
     css_estimate,
     decoupling,
     efficiency_factor,
@@ -263,6 +264,42 @@ acts["start_time"] = acts["start_time"].dt.tz_convert(TZ)
 acts["Sport"] = acts["sport"].map(sport_label)
 
 router = LLMRouter(config, MEMORY_DIR)
+
+# Cache rond de berekeningen die alle seconde-records doorlopen: die worden
+# anders bij elke rerun (elke klik) opnieuw gedaan en groeien mee met de
+# database. De datastand (aantal sessies + nieuwste sessie) is de cachesleutel:
+# na een upload verandert die en wordt alles vers berekend.
+DATA_VERSIE = (len(acts), acts["start_time"].max().isoformat())
+
+
+@st.cache_data(show_spinner=False)
+def cache_pace_at_hr(sport: str, bereik: tuple, versie: tuple) -> pd.DataFrame:
+    return pace_at_hr(conn, acts, sport, bereik)
+
+
+@st.cache_data(show_spinner=False)
+def cache_decoupling(versie: tuple) -> pd.DataFrame:
+    return decoupling(conn, acts)
+
+
+@st.cache_data(show_spinner=False)
+def cache_personal_records(versie: tuple) -> pd.DataFrame:
+    return personal_records(conn, acts)
+
+
+@st.cache_data(show_spinner=False)
+def cache_best_efforts(versie: tuple) -> pd.DataFrame:
+    return best_efforts(conn, acts)
+
+
+@st.cache_data(show_spinner=False)
+def cache_prediction_history(race_in: dict, versie: tuple) -> pd.DataFrame:
+    return race_prediction_history(conn, acts, race_in)
+
+
+@st.cache_data(show_spinner=False)
+def cache_css(versie: tuple) -> dict | None:
+    return css_estimate(conn, acts)
 
 
 def render_upload_feedback():
@@ -498,7 +535,7 @@ with tab_trends:
 
     col_run, col_bike = st.columns(2)
     with col_run:
-        run_trend = pace_at_hr(conn, acts, "running", Z2)
+        run_trend = cache_pace_at_hr("running", Z2, DATA_VERSIE)
         n_runs = (acts["sport"] == "running").sum()
         if run_trend.empty:
             st.info("Nog geen loopsessies met ≥5 min in zone 2 — dat zegt op zich al iets 😉")
@@ -534,7 +571,7 @@ with tab_trends:
             )
 
     with col_bike:
-        bike_trend = pace_at_hr(conn, acts, "cycling", Z2)
+        bike_trend = cache_pace_at_hr("cycling", Z2, DATA_VERSIE)
         n_rides = (acts["sport"] == "cycling").sum()
         if bike_trend.empty:
             st.info("Nog geen fietssessies met ≥5 min in zone 2.")
@@ -757,7 +794,7 @@ with tab_voortgang:
             pad_single_point(fig, ef_sport["start_time"])
             chart(fig, show_legend=False)
 
-    dec = decoupling(conn, acts)
+    dec = cache_decoupling(DATA_VERSIE)
     if not dec.empty:
         dec = dec.copy().sort_values("start_time")
         dec["Sport"] = dec["sport"].map(sport_label)
@@ -801,7 +838,7 @@ with tab_voortgang:
     for emoji, tekst in readiness(acts, race):
         st.markdown(f"{emoji} {tekst}")
 
-    hist = race_prediction_history(conn, acts, race)
+    hist = cache_prediction_history(race, DATA_VERSIE)
     if len(hist) >= 2:
         naam = {"zwem": "Zwemmen", "fiets": "Fietsen", "loop": "Lopen", "totaal": "Totaal"}
         kleuren = {"Zwemmen": SPORT_COLORS["Zwemmen"], "Fietsen": SPORT_COLORS["Fietsen"],
@@ -833,7 +870,7 @@ with tab_voortgang:
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("🏆 Persoonlijke records")
-        prs = personal_records(conn, acts)
+        prs = cache_personal_records(DATA_VERSIE)
         if prs.empty:
             st.info("Nog geen records — importeer trainingen.")
         else:
@@ -1046,6 +1083,35 @@ with tab_lopen:
             fig.update_layout(title="Cadans per sessie")
             chart(fig, show_legend=False)
 
+        inspanningen = cache_best_efforts(DATA_VERSIE)
+        if not inspanningen.empty:
+            st.subheader("Beste inspanningen per sessie")
+            st.caption(
+                "Het snelste aaneengesloten stuk van 1 km en 5 km bínnen elke "
+                "loopsessie, als tempo. Dalende lijnen = sneller worden, ook als "
+                "de sessie als geheel rustig was."
+            )
+            inspanningen = inspanningen.copy()
+            inspanningen["Afstand"] = (inspanningen["afstand_m"] // 1000).map(
+                lambda k: f"Snelste {k} km")
+            inspanningen["tempo"] = pace_as_time(
+                inspanningen["seconden"] / (inspanningen["afstand_m"] / 1000))
+            kleuren = {"Snelste 1 km": PAL["cats"][0], "Snelste 5 km": PAL["cats"][1]}
+            fig = px.line(
+                inspanningen, x="start_time", y="tempo", color="Afstand",
+                markers=True, color_discrete_map=kleuren,
+                custom_data=["seconden"],
+                labels={"start_time": "Datum", "tempo": "Tempo (min/km)", "Afstand": ""},
+            )
+            pace_axis(fig)
+            fig.update_traces(
+                marker=dict(size=9),
+                hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: %{y|%M:%S}/km "
+                              "(totaal %{customdata[0]:.0f} s)<extra></extra>")
+            date_xaxis(fig, inspanningen["start_time"])
+            pad_single_point(fig, inspanningen["start_time"])
+            chart(fig)
+
 with tab_fietsen:
     rides = acts[acts["sport"] == "cycling"].sort_values("start_time")
     if rides.empty:
@@ -1085,7 +1151,7 @@ with tab_zwemmen:
     if swim.empty:
         st.info("Nog geen zwemsessies.")
     else:
-        css = css_estimate(conn, acts)
+        css = cache_css(DATA_VERSIE)
         if css:
             m1, m2, m3 = st.columns(3)
             css_s = css["css_per_100m"]

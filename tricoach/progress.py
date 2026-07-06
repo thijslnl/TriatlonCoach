@@ -301,6 +301,26 @@ def css_estimate(conn: sqlite3.Connection, acts: pd.DataFrame) -> dict | None:
     return {"t400": beste[400], "t200": beste[200], "css_per_100m": dt / 2}
 
 
+def best_efforts(conn: sqlite3.Connection, acts: pd.DataFrame,
+                 targets: tuple[int, ...] = (1000, 5000)) -> pd.DataFrame:
+    """Snelste tijd per doelafstand bínnen elke loopsessie (lange vorm).
+
+    Per sessie en per afstand het snelste aaneengesloten venster uit de
+    seconde-data (zie :func:`_fastest_window`); sessies korter dan de
+    doelafstand vallen er voor die afstand uit. Voor de recordtrend-grafiek.
+    """
+    runs = acts[acts["sport"] == "running"].sort_values("start_time")
+    rows = []
+    for _, act in runs.iterrows():
+        rec = load_records(conn, act["activity_key"])
+        for doel in targets:
+            t = _fastest_window(rec, doel)
+            if t:
+                rows.append({"start_time": act["start_time"],
+                             "afstand_m": doel, "seconden": t})
+    return pd.DataFrame(rows)
+
+
 def race_prediction_history(conn: sqlite3.Connection, acts: pd.DataFrame,
                             race: dict | None = None) -> pd.DataFrame:
     """De racevoorspelling per week, herberekend met alleen de sessies tot en
