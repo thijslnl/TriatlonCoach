@@ -5,6 +5,7 @@ terug die direct te plotten zijn. Hier zit geen Streamlit- of plotly-code;
 dat houdt de berekeningen testbaar los van de presentatie.
 """
 
+import json
 import sqlite3
 
 import pandas as pd
@@ -197,6 +198,26 @@ def aerobic_efficiency_trend(
             "note": "zwemmen: pols-HR onder water onbetrouwbaar",
         }
     return out
+
+
+def run_power(activities: pd.DataFrame) -> pd.DataFrame:
+    """Loopvermogen per sessie uit de FIT-samenvatting (summary_json).
+
+    Garmin schat loopvermogen aan de pols; genormaliseerd vermogen waar
+    beschikbaar, anders het gemiddelde. Indicatief, maar wél consistent
+    tussen sessies van hetzelfde horloge.
+    """
+    runs = activities[activities["sport"] == "running"].sort_values("start_time")
+    rows = []
+    for _, act in runs.iterrows():
+        try:
+            summary = json.loads(act.get("summary_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        vermogen = summary.get("normalized_power") or summary.get("avg_power")
+        if vermogen:
+            rows.append({"start_time": act["start_time"], "watt": float(vermogen)})
+    return pd.DataFrame(rows)
 
 
 def swim_length_matrix(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
