@@ -52,6 +52,23 @@ def fmt_duration(seconds: float | None) -> str:
     return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
+def fmt_hours_hhmm(hours: float | None, signed: bool = False) -> str:
+    """Uren als kommagetal -> 'u:mm' (bijv. 4.3 -> '4:18').
+
+    Met ``signed=True`` krijgt een positief verschil een plus ervoor
+    (voor delta-kolommen); negatief mag hier wél, anders dan bij tempo's.
+    """
+    try:
+        h = float(hours)
+        if math.isnan(h):
+            return GEEN_WAARDE
+    except (TypeError, ValueError):
+        return GEEN_WAARDE
+    teken = "-" if h < 0 else ("+" if signed else "")
+    totaal_min = int(round(abs(h) * 60))
+    return f"{teken}{totaal_min // 60}:{totaal_min % 60:02d}"
+
+
 def fmt_pace_per_km(speed_ms: float | None) -> str:
     """Snelheid (m/s) -> looptempo 'M:SS/km'."""
     if _ongeldig(speed_ms):

@@ -23,6 +23,7 @@ from tricoach.advice import generate_advice, generate_insights, last_advice, las
 from tricoach.analysis import (
     aerobic_efficiency_trend,
     pace_at_hr,
+    run_power,
     stroke_distribution,
     swim_length_matrix,
     swim_per_session,
@@ -38,6 +39,7 @@ from tricoach.formatting import (
     GEEN_WAARDE,
     effective_speed_ms,
     fmt_duration,
+    fmt_hours_hhmm,
     run_cadence_spm,
     sessie_tempo,
     sport_label,
@@ -262,6 +264,9 @@ if acts.empty:
 
 acts["start_time"] = acts["start_time"].dt.tz_convert(TZ)
 acts["Sport"] = acts["sport"].map(sport_label)
+# Eén keer per rerun: de zuivere zwemtijd per sessie (som van actieve banen),
+# gebruikt door de sessietabel, de tempografieken en het sessie-detail.
+zwem_actief = swim_active_seconds(conn)
 
 router = LLMRouter(config, MEMORY_DIR)
 
@@ -449,7 +454,6 @@ with tab_overzicht:
     # ontbrekende avg_speed_ms. Voor zwemmen telt de zuivere zwemtijd (som van
     # de actieve banen) als noemer; rust aan de kant valt zo weg. Elke cel is
     # afgeschermd zodat één rij met een gat in de data de tabel niet laat crashen.
-    zwem_actief = swim_active_seconds(conn)
     tabel["Tempo / snelheid"] = tabel.apply(
         lambda r: veilig_cel(sessie_tempo, r["sport"], r["distance_m"],
                              r["duration_s"], zwem_actief.get(r["activity_key"])),
@@ -503,19 +507,24 @@ with tab_overzicht:
 
     st.subheader("Weektotalen")
     totalen = weekly_totals(acts)
+    # Uren als u:mm — '4:18' leest makkelijker dan '4.3 uur'.
+    totalen["uren"] = totalen["uren"].map(fmt_hours_hhmm)
+    totalen["delta_uren"] = totalen["delta_uren"].map(
+        lambda u: fmt_hours_hhmm(u, signed=True))
+    for kolom in ("uren_swimming", "uren_cycling", "uren_running"):
+        totalen[kolom] = totalen[kolom].map(fmt_hours_hhmm)
     st.dataframe(
         totalen[["week", "sessies", "uren", "delta_uren", "uren_swimming",
                  "uren_cycling", "uren_running", "km", "trimp"]],
         column_config={
             "week": st.column_config.TextColumn("Week"),
             "sessies": st.column_config.NumberColumn("Sessies"),
-            "uren": st.column_config.NumberColumn("Uren", format="%.1f"),
-            "delta_uren": st.column_config.NumberColumn(
-                "Δ uren", format="%+.1f",
-                help="Verschil in trainingsuren met de week eronder."),
-            "uren_swimming": st.column_config.NumberColumn("🏊 (u)", format="%.1f"),
-            "uren_cycling": st.column_config.NumberColumn("🚴 (u)", format="%.1f"),
-            "uren_running": st.column_config.NumberColumn("🏃 (u)", format="%.1f"),
+            "uren": st.column_config.TextColumn("Uren"),
+            "delta_uren": st.column_config.TextColumn(
+                "Δ uren", help="Verschil in trainingsuren met de week eronder."),
+            "uren_swimming": st.column_config.TextColumn("🏊"),
+            "uren_cycling": st.column_config.TextColumn("🚴"),
+            "uren_running": st.column_config.TextColumn("🏃"),
             "km": st.column_config.NumberColumn("Km totaal", format="%.0f"),
             "trimp": st.column_config.NumberColumn(
                 "TRIMP", format="%.0f",
@@ -644,7 +653,6 @@ with tab_trends:
     # afstand en duur (voor zwemmen de zuivere zwemtijd). Zo valt een sessie
     # zonder avg_speed_ms — zoals een samengevoegde zwemsessie — niet meer uit
     # de grafiek.
-    zwem_actief = swim_active_seconds(conn)
     sc = acts.copy()
     sc["eff_speed_ms"] = sc.apply(lambda r: effective_speed_ms(r, zwem_actief), axis=1)
     sc = sc.dropna(subset=["eff_speed_ms", "avg_hr"]).copy()
@@ -1111,6 +1119,25 @@ with tab_lopen:
             date_xaxis(fig, inspanningen["start_time"])
             pad_single_point(fig, inspanningen["start_time"])
             chart(fig)
+
+        vermogen = run_power(acts)
+        if not vermogen.empty:
+            st.subheader("Loopvermogen per sessie")
+            st.caption(
+                "Genormaliseerd vermogen (watt), door het horloge aan de pols "
+                "geschat — indicatief, maar consistent tussen sessies. Stijgend "
+                "vermogen bij gelijke hartslag wijst op groeiende fitheid."
+            )
+            fig = px.line(
+                vermogen, x="start_time", y="watt", markers=True,
+                labels={"start_time": "Datum", "watt": "Vermogen (W)"},
+            )
+            fig.update_traces(
+                marker=dict(size=10), line=dict(color=SPORT_COLORS["Hardlopen"]),
+                hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} W<extra></extra>")
+            date_xaxis(fig, vermogen["start_time"])
+            pad_single_point(fig, vermogen["start_time"])
+            chart(fig, show_legend=False)
 
 with tab_fietsen:
     rides = acts[acts["sport"] == "cycling"].sort_values("start_time")
