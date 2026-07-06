@@ -24,6 +24,8 @@ from tricoach.analysis import (
     aerobic_efficiency_trend,
     pace_at_hr,
     swim_per_session,
+    weekly_intensity_share,
+    weekly_totals,
     weekly_volume,
     weekly_zone_time,
 )
@@ -454,6 +456,29 @@ with tab_overzicht:
         "geen pijl: de pols-hartslag onder water is onbetrouwbaar."
     )
 
+    st.subheader("Weektotalen")
+    totalen = weekly_totals(acts)
+    st.dataframe(
+        totalen[["week", "sessies", "uren", "delta_uren", "uren_swimming",
+                 "uren_cycling", "uren_running", "km", "trimp"]],
+        column_config={
+            "week": st.column_config.TextColumn("Week"),
+            "sessies": st.column_config.NumberColumn("Sessies"),
+            "uren": st.column_config.NumberColumn("Uren", format="%.1f"),
+            "delta_uren": st.column_config.NumberColumn(
+                "Δ uren", format="%+.1f",
+                help="Verschil in trainingsuren met de week eronder."),
+            "uren_swimming": st.column_config.NumberColumn("🏊 (u)", format="%.1f"),
+            "uren_cycling": st.column_config.NumberColumn("🚴 (u)", format="%.1f"),
+            "uren_running": st.column_config.NumberColumn("🏃 (u)", format="%.1f"),
+            "km": st.column_config.NumberColumn("Km totaal", format="%.0f"),
+            "trimp": st.column_config.NumberColumn(
+                "TRIMP", format="%.0f",
+                help="Totale trainingsbelasting van de week (tijd × zonegewicht)."),
+        },
+        hide_index=True, width="stretch",
+    )
+
 # ------------------------------------------------------------------ trends --
 with tab_trends:
     st.subheader(f"Tempo bij gelijke hartslag (zone 2: {Z2[0]}–{Z2[1]})")
@@ -532,6 +557,37 @@ with tab_trends:
                 f"{n_rides - len(bike_trend)} van je {n_rides} fietssessies is weggelaten: "
                 "minder dan 5 minuten in zone 2."
             )
+
+    st.divider()
+    st.subheader("Intensiteitsverdeling per week (80/20-check)")
+    st.caption(
+        "Duursporters trainen idealiter ± 80% rustig (zone 1–2) en maar een klein "
+        "deel echt hard. Deze balken tonen per week hoe je hartslagtijd verdeeld "
+        "was; de stippellijn is het 80%-doel voor het rustige aandeel."
+    )
+    intens = weekly_intensity_share(acts)
+    if intens.empty:
+        st.info("Nog geen sessies met zonetijd.")
+    else:
+        cat_kleuren = {
+            "Rustig (Z1–Z2)": PAL["zones"][1],
+            "Grijze zone (Z3)": PAL["muted"],
+            "Hard (Z4–Z5)": PAL["zones"][4],
+        }
+        fig = px.bar(
+            intens, x="week", y="pct", color="categorie",
+            color_discrete_map=cat_kleuren,
+            category_orders={"week": sorted(intens["week"].unique()),
+                             "categorie": list(cat_kleuren)},
+            labels={"week": "Week", "pct": "Aandeel (%)", "categorie": ""},
+        )
+        fig.add_hline(y=80, line_dash="dash", line_color=PAL["ref_line"],
+                      annotation_text="doel: ≥80% rustig",
+                      annotation_font_color=PAL["muted"])
+        fig.update_traces(
+            marker_line=dict(width=1, color=PAL["surface"]),
+            hovertemplate="%{x} · %{fullData.name}: %{y:.0f}%<extra></extra>")
+        chart(fig)
 
     st.subheader("Snelheid/tempo tegenover hartslag — per sport")
     st.caption(

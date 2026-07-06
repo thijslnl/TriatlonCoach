@@ -10,6 +10,7 @@ import sqlite3
 import pandas as pd
 
 from tricoach.formatting import derive_speed_ms
+from tricoach.progress import trimp_per_session
 from tricoach.storage import load_records
 from tricoach.zones import ZONE_NAMES, intensity_category
 
@@ -45,6 +46,55 @@ def weekly_zone_time(activities: pd.DataFrame) -> pd.DataFrame:
     out = melted.groupby(["week", "zone"], as_index=False)["seconden"].sum()
     out["minuten"] = out["seconden"] / 60
     return out.sort_values(["week", "zone"])
+
+
+def weekly_intensity_share(activities: pd.DataFrame) -> pd.DataFrame:
+    """Intensiteitsverdeling per week: aandeel rustig (Z1–Z2), grijze zone
+    (Z3) en hard (Z4–Z5) als percentage van de gemeten zonetijd.
+
+    Lange vorm (week, categorie, pct) voor een 100%-gestapelde weekbalk —
+    de klassieke 80/20-check voor duursporters.
+    """
+    df = add_week(activities)
+    per_week = df.groupby("week")[["z1_s", "z2_s", "z3_s", "z4_s", "z5_s"]].sum()
+    per_week = per_week[per_week.sum(axis=1) > 0]
+    if per_week.empty:
+        return pd.DataFrame()
+    totaal = per_week.sum(axis=1)
+    breed = pd.DataFrame({
+        "week": per_week.index,
+        "Rustig (Z1–Z2)": (per_week["z1_s"] + per_week["z2_s"]) / totaal * 100,
+        "Grijze zone (Z3)": per_week["z3_s"] / totaal * 100,
+        "Hard (Z4–Z5)": (per_week["z4_s"] + per_week["z5_s"]) / totaal * 100,
+    })
+    lang = breed.melt(id_vars="week", var_name="categorie", value_name="pct")
+    return lang.sort_values("week")
+
+
+def weekly_totals(activities: pd.DataFrame) -> pd.DataFrame:
+    """Weektotalen voor het overzicht: sessies, uren (totaal en per sport),
+    kilometers en TRIMP per week, nieuwste week eerst.
+
+    ``delta_uren`` is het verschil in trainingsuren met de eerstvolgende
+    oudere week in de tabel.
+    """
+    df = add_week(activities)
+    df["trimp"] = trimp_per_session(activities)["trimp"]
+    per_week = df.groupby("week").agg(
+        sessies=("activity_key", "count"),
+        uren=("duration_s", "sum"),
+        km=("distance_m", "sum"),
+        trimp=("trimp", "sum"),
+    )
+    per_week["uren"] = per_week["uren"] / 3600
+    per_week["km"] = per_week["km"] / 1000
+    per_sport = (df.groupby(["week", "sport"])["duration_s"].sum() / 3600).unstack()
+    for sport in ("swimming", "cycling", "running"):
+        kolom = per_sport[sport] if sport in per_sport else 0.0
+        per_week[f"uren_{sport}"] = kolom
+    per_week = per_week.fillna(0.0).sort_index(ascending=False).reset_index()
+    per_week["delta_uren"] = per_week["uren"].diff(-1)
+    return per_week
 
 
 def pace_at_hr(
