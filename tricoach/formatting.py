@@ -99,9 +99,44 @@ def sessie_tempo(sport: str, distance_m: float | None,
     return fmt_pace_per_100m(derive_speed_ms(distance_m, zwemtijd))
 
 
+def effective_speed_ms(row, active_swim_s: dict | None = None) -> float | None:
+    """Effectieve snelheid (m/s) van een sessie(-rij uit de activiteitentabel).
+
+    Gebruikt ``avg_speed_ms`` waar aanwezig en valt anders terug op afstand en
+    duur — voor zwemmen bij voorkeur de zuivere zwemtijd uit ``active_swim_s``
+    (dict activity_key -> seconden), zodat rust aan de kant niet meetelt. Zo
+    valt een sessie zonder ``avg_speed_ms`` (zoals een samengevoegde
+    zwemsessie) niet uit de grafieken.
+    """
+    if not _ongeldig(row["avg_speed_ms"]):
+        return float(row["avg_speed_ms"])
+    tijd = None
+    if row["sport"] == "swimming" and active_swim_s:
+        tijd = active_swim_s.get(row["activity_key"])
+    return derive_speed_ms(row["distance_m"], tijd or row["duration_s"])
+
+
+def run_cadence_spm(avg_cadence: float | None) -> float | None:
+    """Garmin-loopcadans (rpm, één been) -> stappen per minuut (beide benen)."""
+    if _ongeldig(avg_cadence):
+        return None
+    return float(avg_cadence) * 2
+
+
 SPORT_NL = {"running": "Hardlopen", "cycling": "Fietsen", "swimming": "Zwemmen"}
+
+STROKE_NL = {
+    "breaststroke": "Schoolslag", "freestyle": "Borstcrawl",
+    "backstroke": "Rugslag", "butterfly": "Vlinderslag",
+    "mixed": "Gemengd", "drill": "Oefening", "im": "Wisselslag",
+}
 
 
 def sport_label(sport: str) -> str:
     """Engelse FIT-sportnaam -> Nederlands label."""
     return SPORT_NL.get(sport, sport.capitalize())
+
+
+def stroke_label(stroke: str) -> str:
+    """Engelse FIT-slagnaam -> Nederlands label."""
+    return STROKE_NL.get(stroke, stroke)

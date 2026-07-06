@@ -32,10 +32,12 @@ from tricoach.config import load_config, resolve_path
 from tricoach.feedback import generate_feedback
 from tricoach.formatting import (
     GEEN_WAARDE,
-    derive_speed_ms,
+    effective_speed_ms,
     fmt_duration,
+    run_cadence_spm,
     sessie_tempo,
     sport_label,
+    stroke_label,
 )
 from tricoach.progress import (
     acwr_status,
@@ -96,13 +98,6 @@ ZONE_LABELS = {
     "Z5": f"Zone 5 (> {BOUNDS[3]})",
 }
 ZONE_COLORS = dict(zip(ZONE_LABELS.values(), PAL["zones"]))
-STROKE_NL = {
-    "breaststroke": "Schoolslag", "freestyle": "Borstcrawl",
-    "backstroke": "Rugslag", "butterfly": "Vlinderslag",
-    "mixed": "Gemengd", "drill": "Oefening", "im": "Wisselslag",
-}
-
-
 def chart(fig, show_legend: bool = True):
     """Render een figuur in huisstijl, met de gedeelde modebar-config."""
     st.plotly_chart(style_fig(fig, show_legend), width="stretch", config=PLOTLY_CONFIG)
@@ -510,15 +505,8 @@ with tab_trends:
     # zonder avg_speed_ms — zoals een samengevoegde zwemsessie — niet meer uit
     # de grafiek.
     zwem_actief = swim_active_seconds(conn)
-
-    def _eff_speed(r):
-        if pd.notna(r["avg_speed_ms"]) and r["avg_speed_ms"] > 0:
-            return r["avg_speed_ms"]
-        tijd = zwem_actief.get(r["activity_key"]) if r["sport"] == "swimming" else None
-        return derive_speed_ms(r["distance_m"], tijd or r["duration_s"])
-
     sc = acts.copy()
-    sc["eff_speed_ms"] = sc.apply(_eff_speed, axis=1)
+    sc["eff_speed_ms"] = sc.apply(lambda r: effective_speed_ms(r, zwem_actief), axis=1)
     sc = sc.dropna(subset=["eff_speed_ms", "avg_hr"]).copy()
     sc["Datum"] = sc["start_time"].dt.strftime("%d-%m-%Y")
 
@@ -704,7 +692,7 @@ with tab_voortgang:
             chart(fig, show_legend=False)
         if not swolf_slag.empty:
             swolf_slag = swolf_slag.copy()
-            swolf_slag["Slag"] = swolf_slag["slag"].map(lambda s: STROKE_NL.get(s, s))
+            swolf_slag["Slag"] = swolf_slag["slag"].map(stroke_label)
             fig = px.line(
                 swolf_slag, x="start_time", y="swolf", color="Slag", markers=True,
                 labels={"start_time": "Datum", "swolf": "SWOLF"},
@@ -724,7 +712,7 @@ with tab_lopen:
     else:
         runs = runs.copy()
         runs["tempo"] = pace_as_time(1000 / runs["avg_speed_ms"])
-        runs["cadans_spm"] = runs["avg_cadence"] * 2  # Garmin telt één been
+        runs["cadans_spm"] = runs["avg_cadence"].map(run_cadence_spm)
         c1, c2 = st.columns(2)
         with c1:
             fig = px.scatter(
@@ -825,7 +813,7 @@ with tab_zwemmen:
             "WHERE activity_key = ? GROUP BY swim_stroke",
             conn, params=(laatste["activity_key"],))
         if not lengths.empty:
-            lengths["Slag"] = lengths["swim_stroke"].map(lambda s: STROKE_NL.get(s, s))
+            lengths["Slag"] = lengths["swim_stroke"].map(stroke_label)
             st.subheader(f"Slagverdeling laatste sessie ({laatste['start_time']:%d-%m-%Y})")
             fig = px.pie(lengths, names="Slag", values="banen", hole=0.4)
             fig.update_traces(hovertemplate="%{label}: %{value} banen (%{percent})<extra></extra>")
