@@ -39,6 +39,7 @@ from tricoach.formatting import (
     fmt_pace_per_100m,
     fmt_pace_per_km,
     fmt_speed_kmh,
+    local_time,
     sport_label,
 )
 from tricoach.llm.router import LLMRouter
@@ -230,7 +231,7 @@ def generate_feedback(
     fb = Feedback(
         activity_key=act.activity_key,
         sport=sport_label(act.sport),
-        start_time=f"{act.start_time:%a %d-%m %H:%M}",
+        start_time=f"{local_time(act.start_time):%a %d-%m %H:%M}",
         kerncijfers=kerncijfers(act),
         zoneverdeling=zone_regel(tiz),
         feedback=feedback_text,
@@ -258,7 +259,7 @@ def _append_feedback_md(
     if not path.exists():
         path.write_text(HEADER, encoding="utf-8")
     entry = (
-        f"\n## {act.start_time:%Y-%m-%d %a} — {fb.sport}\n\n"
+        f"\n## {local_time(act.start_time):%Y-%m-%d %a} — {fb.sport}\n\n"
         f"- **Kerncijfers:** {fb.kerncijfers}\n"
     )
     if wind is not None:
@@ -286,7 +287,7 @@ def _append_advies_md(memory_dir: Path, act: ParsedActivity, aanpassing: str) ->
         path.write_text(ADVIEZEN_HEADER, encoding="utf-8")
     entry = (
         f"\n## {datetime.now():%Y-%m-%d %H:%M} — Sessie-advies "
-        f"(na {sport_label(act.sport)} {act.start_time:%d-%m})\n\n"
+        f"(na {sport_label(act.sport)} {local_time(act.start_time):%d-%m})\n\n"
         f"{aanpassing}\n"
     )
     with open(path, "a", encoding="utf-8") as f:

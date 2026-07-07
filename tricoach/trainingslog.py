@@ -13,6 +13,7 @@ from tricoach.formatting import (
     fmt_pace_per_100m,
     fmt_pace_per_km,
     fmt_speed_kmh,
+    local_time,
     sport_label,
 )
 
@@ -75,7 +76,7 @@ def append_entry(
         log_path.write_text(HEADER, encoding="utf-8")
 
     entry = (
-        f"\n## {act.start_time:%Y-%m-%d %a %H:%M} — {sport_label(act.sport)}\n\n"
+        f"\n## {local_time(act.start_time):%Y-%m-%d %a %H:%M} — {sport_label(act.sport)}\n\n"
         f"- **Kerncijfers:** {kerncijfers(act)}\n"
         f"- **Tijd in zones:** {zone_regel(tiz)}\n"
         f"- **Observaties:** {observation or '_nog geen (LLM volgt)_'}\n"

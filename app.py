@@ -41,6 +41,7 @@ from tricoach.formatting import (
     effective_speed_ms,
     fmt_duration,
     fmt_hours_hhmm,
+    local_time,
     run_cadence_spm,
     sessie_tempo,
     sport_label,
@@ -233,7 +234,7 @@ with st.sidebar:
                 )
                 for r in results:
                     icon = {"nieuw": "✅", "duplicaat": "↩️"}.get(r.status, "🗑️")
-                    st.write(f"{icon} {r.activity.start_time:%d-%m %H:%M} "
+                    st.write(f"{icon} {local_time(r.activity.start_time):%d-%m %H:%M} "
                              f"{sport_label(r.activity.sport)} — {r.status}")
                     if r.status == "verwijderd":
                         st.caption(

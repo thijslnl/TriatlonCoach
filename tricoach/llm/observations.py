@@ -6,7 +6,7 @@ aandacht voor zonediscipline (de bekende valkuil: te hard trainen).
 """
 
 from tricoach.fit_parser import ParsedActivity
-from tricoach.formatting import fmt_duration, sport_label
+from tricoach.formatting import fmt_duration, local_time, sport_label
 from tricoach.llm.router import LLMRouter
 from tricoach.trainingslog import kerncijfers, zone_regel
 
@@ -23,7 +23,7 @@ SYSTEM = (
 def session_observation(router: LLMRouter, act: ParsedActivity, tiz: dict[str, int]) -> str | None:
     """Vraag Ollama om een korte observatie. Geeft None bij fouten (import gaat door)."""
     prompt = (
-        f"Sessie: {sport_label(act.sport)}, {act.start_time:%A %d-%m-%Y}\n"
+        f"Sessie: {sport_label(act.sport)}, {local_time(act.start_time):%A %d-%m-%Y}\n"
         f"Kerncijfers: {kerncijfers(act)}\n"
         f"Tijd in hartslagzones: {zone_regel(tiz)}\n"
         f"Totale duur: {fmt_duration(act.duration_s)}"

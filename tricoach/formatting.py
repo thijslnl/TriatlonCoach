@@ -13,9 +13,29 @@ te crashen. Eén kapotte sessie mag nooit de hele tabel laten vallen.
 
 import math
 
+import pandas as pd
+
 # Placeholder voor een onbekende/ongeldige waarde; gelijk aan wat de tabel
 # elders (% in zone 2, trend) toont, zodat lege cellen er consistent uitzien.
 GEEN_WAARDE = "—"
+
+# Garmin/FIT slaat tijden op in UTC; alles wat een gebruiker of de coach te
+# zien krijgt (logboek, feedback, UI) hoort in lokale tijd te staan.
+TZ = "Europe/Amsterdam"
+
+
+def local_time(ts) -> pd.Timestamp:
+    """Zet een (UTC-)tijdstempel om naar lokale tijd (Europe/Amsterdam).
+
+    Hét conversiepunt voor weergave: FIT-starttijden zijn UTC (soms naïef,
+    dan wordt UTC aangenomen). Gebruik dit overal waar een sessietijd wordt
+    getoond of naar een memory-bestand geschreven, zodat logboek, feedback en
+    dashboard dezelfde (lokale) klok hanteren.
+    """
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(TZ)
 
 
 def _ongeldig(x) -> bool:

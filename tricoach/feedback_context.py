@@ -41,6 +41,7 @@ from tricoach.formatting import (
     fmt_pace_per_100m,
     fmt_pace_per_km,
     fmt_speed_kmh,
+    local_time,
     sport_label,
 )
 from tricoach.removal import section_is_deleted
@@ -48,8 +49,6 @@ from tricoach.schedule import schedule_as_text
 from tricoach.storage import load_activities, load_lengths
 from tricoach.trainingslog import kerncijfers, zone_regel
 from tricoach.zones import intensity_category, zone_bounds
-
-TZ = "Europe/Amsterdam"
 
 # Hoeveel vergelijkbare eerdere sessies er maximaal meegaan.
 MAX_SIMILAR = 5
@@ -61,12 +60,8 @@ NOTES_DAYS = 14
 MAX_ADVICE_CHARS = 1500
 
 
-def _local(ts) -> pd.Timestamp:
-    """Tijdstempel naar lokale tijd (Europe/Amsterdam) voor leesbare datums."""
-    ts = pd.Timestamp(ts)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    return ts.tz_convert(TZ)
+# Lokale weergavetijd komt uit de gedeelde helper; hier alleen een korte alias.
+_local = local_time
 
 
 def _note(row: pd.Series) -> str | None:

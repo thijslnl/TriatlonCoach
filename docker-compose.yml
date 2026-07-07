@@ -1,9 +1,10 @@
 # Triatlon Coach op Unraid (of elke Docker-host).
 #
 # Build één keer:   docker compose up -d --build
-# Daarna volstaat een herstart na codewijzigingen niet eens altijd: de app
-# herlaadt dankzij runOnSave automatisch. Alleen na het wijzigen van
-# requirements.txt opnieuw bouwen met --build.
+# runOnSave herlaadt alleen app.py automatisch; na wijzigingen in
+# tricoach/*-modules is een containerherstart nodig (docker restart
+# triatlon-coach). Alleen na het wijzigen van requirements.txt opnieuw
+# bouwen met --build.
 
 services:
   triatlon-coach:
@@ -17,6 +18,10 @@ services:
       # meteen actief; de database (data/) en memory/ blijven dus ook gewoon op
       # de host staan en overleven een container-herstart.
       - .:/app
+    environment:
+      # Zonder TZ draait de container op UTC en staan alle datetime.now()-
+      # stempels (adviezen, llm-log, imported_at/deleted_at) op GMT.
+      - TZ=Europe/Amsterdam
     env_file:
       # Bevat ANTHROPIC_API_KEY (wordt door de app via python-dotenv geladen).
       - .env
