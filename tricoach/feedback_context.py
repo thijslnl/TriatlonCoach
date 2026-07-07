@@ -43,6 +43,7 @@ from tricoach.formatting import (
     fmt_speed_kmh,
     sport_label,
 )
+from tricoach.removal import section_is_deleted
 from tricoach.schedule import schedule_as_text
 from tricoach.storage import load_activities, load_lengths
 from tricoach.trainingslog import kerncijfers, zone_regel
@@ -491,10 +492,16 @@ def profile_block(memory_dir: Path, config: dict) -> str:
 
 def _last_md_section(path: Path, heading_contains: str | None = None) -> str | None:
     """De laatste '## '-sectie uit een markdown-bestand, optioneel gefilterd
-    op een woord in de kopregel (bijv. alleen 'Weekadvies'-secties)."""
+    op een woord in de kopregel (bijv. alleen 'Weekadvies'-secties).
+
+    Secties die als vervallen zijn gemarkeerd (de sessie is verwijderd, zie
+    :mod:`tricoach.removal`) worden overgeslagen, zodat feedback op een
+    verwijderde sessie niet meer als continuïteits-context meegaat.
+    """
     if not path.exists():
         return None
     parts = path.read_text(encoding="utf-8").split("\n## ")[1:]
+    parts = [p for p in parts if not section_is_deleted(p)]
     if heading_contains:
         parts = [p for p in parts if heading_contains in p.splitlines()[0]]
     return "## " + parts[-1] if parts else None

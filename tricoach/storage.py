@@ -10,6 +10,12 @@ Drie tabellen:
 De primaire sleutel van ``activities`` is ``activity_key`` (de starttijd uit
 het FIT-bestand); een tweede import van dezelfde activiteit wordt daardoor
 genegeerd in plaats van gedupliceerd.
+
+Verwijderen is een *soft delete*: ``deleted_at`` wordt gevuld en
+``load_activities`` filtert die rijen weg, maar de rij (en de records/banen)
+blijft staan. Zo blijft de dedup werken — een verwijderde sessie komt bij een
+herimport niet stilletjes terug — en is herstellen altijd mogelijk. Definitief
+wissen kan met ``purge_activity``.
 """
 
 import json
@@ -49,7 +55,8 @@ CREATE TABLE IF NOT EXISTS activities (
     temperature_c  REAL,
     summary_json  TEXT,
     source_file   TEXT,
-    imported_at   TEXT
+    imported_at   TEXT,
+    deleted_at    TEXT
 );
 CREATE TABLE IF NOT EXISTS records (
     activity_key TEXT NOT NULL REFERENCES activities(activity_key),
@@ -97,6 +104,10 @@ _ADDED_COLUMNS = {
     "wind_gusts": "REAL",
     # Temperatuur tijdens de sessie (Open-Meteo), voor de feedback-context.
     "temperature_c": "REAL",
+    # Soft delete: gevuld = de sessie is verwijderd en telt nergens meer mee,
+    # maar de rij blijft staan zodat de dedup op activity_key intact blijft
+    # en herstellen mogelijk is.
+    "deleted_at": "TEXT",
 }
 
 
@@ -129,11 +140,24 @@ def aerobic_efficiency(sport: str, avg_speed_ms: float | None,
 
 
 def activity_exists(conn: sqlite3.Connection, activity_key: str) -> bool:
-    """Is deze activiteit al eens geïmporteerd?"""
+    """Is deze activiteit al eens geïmporteerd?
+
+    Telt bewust óók soft-verwijderde sessies mee: de dedup moet een verwijderde
+    activiteit bij een herimport blijven herkennen, anders komt hij stilletjes
+    terug.
+    """
     row = conn.execute(
         "SELECT 1 FROM activities WHERE activity_key = ?", (activity_key,)
     ).fetchone()
     return row is not None
+
+
+def is_deleted(conn: sqlite3.Connection, activity_key: str) -> bool:
+    """Is deze activiteit soft-verwijderd? (False als hij niet bestaat.)"""
+    row = conn.execute(
+        "SELECT deleted_at FROM activities WHERE activity_key = ?", (activity_key,)
+    ).fetchone()
+    return row is not None and row[0] is not None
 
 
 def save_activity(
@@ -228,12 +252,69 @@ def save_activity(
 
 
 def load_activities(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Alle sessies als DataFrame, nieuwste eerst."""
+    """Alle niet-verwijderde sessies als DataFrame, nieuwste eerst.
+
+    Dit is het ene filterpunt voor soft deletes: alles wat sessies toont of
+    meerekent (tabellen, grafieken, trends, weekvolume, feedback-context)
+    leest via deze functie en ziet verwijderde sessies dus niet.
+    """
     df = pd.read_sql_query(
-        "SELECT * FROM activities ORDER BY start_time DESC", conn)
+        "SELECT * FROM activities WHERE deleted_at IS NULL "
+        "ORDER BY start_time DESC", conn)
     if not df.empty:
         df["start_time"] = pd.to_datetime(df["start_time"])
     return df
+
+
+def load_deleted_activities(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Alleen de soft-verwijderde sessies, nieuwste eerst (voor herstel-UI)."""
+    df = pd.read_sql_query(
+        "SELECT * FROM activities WHERE deleted_at IS NOT NULL "
+        "ORDER BY start_time DESC", conn)
+    if not df.empty:
+        df["start_time"] = pd.to_datetime(df["start_time"])
+    return df
+
+
+def soft_delete_activity(conn: sqlite3.Connection, activity_key: str) -> bool:
+    """Markeer een sessie als verwijderd (soft delete).
+
+    De rij blijft staan; alleen ``deleted_at`` wordt gezet. Geeft True terug
+    als er daadwerkelijk een (nog niet verwijderde) sessie is gemarkeerd.
+    """
+    cur = conn.execute(
+        "UPDATE activities SET deleted_at = ? "
+        "WHERE activity_key = ? AND deleted_at IS NULL",
+        (datetime.now().isoformat(timespec="seconds"), activity_key),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def restore_activity(conn: sqlite3.Connection, activity_key: str) -> bool:
+    """Maak een soft delete ongedaan. Geeft True als er iets hersteld is."""
+    cur = conn.execute(
+        "UPDATE activities SET deleted_at = NULL "
+        "WHERE activity_key = ? AND deleted_at IS NOT NULL",
+        (activity_key,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def purge_activity(conn: sqlite3.Connection, activity_key: str) -> bool:
+    """Wis een sessie definitief uit alle tabellen (activities, records, lengths).
+
+    Onomkeerbaar — en de dedup vergeet deze activiteit, dus een herimport van
+    dezelfde zip voegt hem gewoon opnieuw toe. Geeft True als er een rij is
+    gewist.
+    """
+    conn.execute("DELETE FROM records WHERE activity_key = ?", (activity_key,))
+    conn.execute("DELETE FROM lengths WHERE activity_key = ?", (activity_key,))
+    cur = conn.execute(
+        "DELETE FROM activities WHERE activity_key = ?", (activity_key,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def load_records(conn: sqlite3.Connection, activity_key: str) -> pd.DataFrame:

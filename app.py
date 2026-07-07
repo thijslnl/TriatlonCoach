@@ -79,9 +79,11 @@ from tricoach.viz import (
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
 from tricoach.feedback_context import hr_drift_values, run_splits_df
+from tricoach.removal import purge_session, remove_session, restore_session
 from tricoach.storage import (
     connect,
     load_activities,
+    load_deleted_activities,
     load_lengths,
     load_records,
     recompute_zones,
@@ -230,9 +232,13 @@ with st.sidebar:
                     user_note=user_note,
                 )
                 for r in results:
-                    icon = "✅" if r.status == "nieuw" else "↩️"
+                    icon = {"nieuw": "✅", "duplicaat": "↩️"}.get(r.status, "🗑️")
                     st.write(f"{icon} {r.activity.start_time:%d-%m %H:%M} "
                              f"{sport_label(r.activity.sport)} — {r.status}")
+                    if r.status == "verwijderd":
+                        st.caption(
+                            "Deze sessie is eerder verwijderd en blijft verwijderd. "
+                            "Herstellen kan via ⚙️ Instellingen → Verwijderde sessies.")
                     if r.status == "nieuw" and r.wind is not None:
                         st.caption(f"🌬️ Wind: {r.wind.as_text()}")
                     # Alleen nieuwe sessies krijgen coaching-feedback (Sonnet);
@@ -954,6 +960,27 @@ with tab_sessie:
     c5.metric("HR-drift", f"{drift[1] - drift[0]:+.0f} bpm" if drift else GEEN_WAARDE,
               help="Gemiddelde hartslag van de tweede helft minus de eerste helft. "
                    "Duidelijk oplopend = vermoeidheid of een te hoog begintempo.")
+
+    # Verwijderen is een soft delete met expliciete bevestiging: één misklik
+    # kost geen data, en herstellen kan altijd via de instellingen-tab.
+    with st.expander("🗑️ Deze sessie verwijderen"):
+        st.caption(
+            "De sessie verdwijnt uit alle tabellen, grafieken, trends en de "
+            "feedback-context, maar blijft bewaard in de database. Herstellen "
+            "of definitief wissen kan via ⚙️ Instellingen → Verwijderde sessies. "
+            "Bij een herimport van dezelfde zip blijft de sessie verwijderd."
+        )
+        del_reden = st.text_input(
+            "Reden (optioneel, komt in het trainingslog)",
+            placeholder="bijv. verkeerd bestand · dubbele upload",
+            key=f"del_reden_{gekozen}",
+        )
+        del_zeker = st.checkbox("Weet je het zeker?", key=f"del_zeker_{gekozen}")
+        if st.button("🗑️ Verwijder deze sessie", type="secondary",
+                     disabled=not del_zeker, key=f"del_knop_{gekozen}"):
+            remove_session(conn, MEMORY_DIR, gekozen, reason=del_reden)
+            st.toast(f"Sessie {sessie_labels[gekozen]} verwijderd.")
+            st.rerun()
 
     if is_zwem:
         if banen.empty:
@@ -1744,5 +1771,63 @@ with tab_settings:
             "(prijzen per miljoen tokens onder `anthropic.model_prices` in config.yaml; "
             "onbekende modellen vallen terug op de standaardprijs). Bron: memory/llm_log.md."
         )
+
+    st.divider()
+    # Onopvallend beheer van soft-verwijderde sessies: tonen, herstellen of
+    # definitief wissen. Verwijderen zelf gebeurt op de 🔍 Sessie-tab.
+    verwijderd = load_deleted_activities(conn)
+    with st.expander(f"🗑️ Verwijderde sessies ({len(verwijderd)})"):
+        if verwijderd.empty:
+            st.caption(
+                "Geen verwijderde sessies. Een sessie verwijderen kan op de "
+                "🔍 Sessie-tab; hij komt dan hier terecht en kan worden "
+                "hersteld of definitief gewist."
+            )
+        else:
+            toon = verwijderd.copy()
+            toon["start_time"] = toon["start_time"].dt.tz_convert(TZ)
+            toon["Sport"] = toon["sport"].map(sport_label)
+            toon["Afstand"] = toon["distance_m"] / 1000
+            st.dataframe(
+                toon[["start_time", "Sport", "Afstand", "avg_hr", "deleted_at"]],
+                column_config={
+                    "start_time": st.column_config.DatetimeColumn(
+                        "Datum", format="DD-MM-YYYY HH:mm"),
+                    "Afstand": st.column_config.NumberColumn("Afstand", format="%.2f km"),
+                    "avg_hr": st.column_config.NumberColumn("Gem. HR"),
+                    "deleted_at": st.column_config.DatetimeColumn(
+                        "Verwijderd op", format="DD-MM-YYYY HH:mm"),
+                },
+                hide_index=True, width="stretch",
+            )
+            del_labels = {
+                r["activity_key"]: (
+                    f"{r['start_time'].tz_convert(TZ):%d-%m-%Y %H:%M} · "
+                    f"{sport_label(r['sport'])}"
+                    + (f" · {r['distance_m'] / 1000:.1f} km"
+                       if pd.notna(r["distance_m"]) else "")
+                )
+                for _, r in verwijderd.iterrows()
+            }
+            herstel_keuze = st.selectbox(
+                "Sessie", verwijderd["activity_key"].tolist(),
+                format_func=del_labels.get, key="herstel_keuze",
+            )
+            col_herstel, col_wis = st.columns(2)
+            with col_herstel:
+                if st.button("↩️ Herstellen", width="stretch"):
+                    restore_session(conn, MEMORY_DIR, herstel_keuze)
+                    st.toast(f"Sessie {del_labels[herstel_keuze]} hersteld.")
+                    st.rerun()
+            with col_wis:
+                wis_zeker = st.checkbox(
+                    "Definitief wissen kan niet ongedaan worden gemaakt — "
+                    "ik weet het zeker", key="wis_zeker",
+                )
+                if st.button("❌ Definitief wissen", disabled=not wis_zeker,
+                             width="stretch"):
+                    purge_session(conn, MEMORY_DIR, herstel_keuze)
+                    st.toast(f"Sessie {del_labels[herstel_keuze]} definitief gewist.")
+                    st.rerun()
 
 conn.close()

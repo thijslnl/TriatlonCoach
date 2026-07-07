@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from tricoach.fit_parser import ParsedActivity, parse_zip
-from tricoach.storage import activity_exists, save_activity
+from tricoach.storage import activity_exists, is_deleted, save_activity
 from tricoach.trainingslog import append_entry
 from tricoach.weather import WindData
 from tricoach.zones import time_in_zones, zone_bounds
@@ -39,7 +39,7 @@ class ImportResult:
     """
 
     activity: ParsedActivity
-    status: str  # "nieuw" of "duplicaat"
+    status: str  # "nieuw", "duplicaat" of "verwijderd" (blijft verwijderd)
     tiz: dict[str, int] = field(default_factory=dict)
     observation: str | None = None
     user_note: str | None = None
@@ -68,8 +68,11 @@ def import_zip(
 
     for act in parse_zip(zip_path):
         # Eerst dedup-check: duplicaten kosten geen Ollama-, weer- of API-call.
+        # Een soft-verwijderde sessie telt óók als bekend en blijft verwijderd:
+        # de status "verwijderd" laat de UI uitleggen hoe je hem kunt herstellen.
         if activity_exists(conn, act.activity_key):
-            results.append(ImportResult(act, "duplicaat"))
+            status = "verwijderd" if is_deleted(conn, act.activity_key) else "duplicaat"
+            results.append(ImportResult(act, status))
             continue
 
         tiz = time_in_zones(act.records, bounds) if not act.records.empty else {}

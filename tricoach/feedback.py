@@ -42,6 +42,7 @@ from tricoach.formatting import (
     sport_label,
 )
 from tricoach.llm.router import LLMRouter
+from tricoach.removal import section_is_deleted
 from tricoach.trainingslog import kerncijfers, zone_regel
 
 SYSTEM = (
@@ -154,12 +155,18 @@ class Feedback:
 
 
 def last_proposed_adjustment(memory_dir: Path) -> str | None:
-    """De laatst voorgestelde aanpassing uit feedback.md (voor de adherence-check)."""
+    """De laatst voorgestelde aanpassing uit feedback.md (voor de adherence-check).
+
+    Secties van verwijderde sessies (vervallen-markering, zie
+    :mod:`tricoach.removal`) tellen niet mee.
+    """
     path = memory_dir / "feedback.md"
     if not path.exists():
         return None
     secties = path.read_text(encoding="utf-8").split("\n## ")[1:]
     for blok in reversed(secties):
+        if section_is_deleted(blok):
+            continue
         m = re.search(r"\*\*Voorgestelde aanpassing:\*\* (.+)", blok)
         if m and m.group(1).strip() not in ("—", "-", "Geen"):
             return m.group(1).strip()
@@ -287,9 +294,13 @@ def _append_advies_md(memory_dir: Path, act: ParsedActivity, aanpassing: str) ->
 
 
 def last_feedback_markdown(memory_dir: Path) -> str | None:
-    """De laatst vastgelegde feedback-sectie (voor weergave zonder nieuwe call)."""
+    """De laatst vastgelegde feedback-sectie (voor weergave zonder nieuwe call).
+
+    Vervallen secties (sessie verwijderd) worden overgeslagen.
+    """
     path = memory_dir / "feedback.md"
     if not path.exists():
         return None
-    parts = path.read_text(encoding="utf-8").split("\n## ")
-    return "## " + parts[-1] if len(parts) > 1 else None
+    parts = path.read_text(encoding="utf-8").split("\n## ")[1:]
+    parts = [p for p in parts if not section_is_deleted(p)]
+    return "## " + parts[-1] if parts else None
