@@ -1234,16 +1234,22 @@ with tab_zwemmen:
             )
         c1, c2 = st.columns(2)
         with c1:
-            fig = px.line(
-                swim, x="start_time", y="swolf", markers=True,
-                labels={"start_time": "Datum", "swolf": "SWOLF"},
-            )
-            fig.update_traces(
-                marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
-                hovertemplate="%{x|%d-%m-%Y} · SWOLF %{y:.0f}<extra></extra>",
-            )
-            fig.update_layout(title="Gemiddelde SWOLF per sessie (lager = efficiënter)")
-            chart(fig, show_legend=False)
+            swolf_df = swim.dropna(subset=["swolf"])
+            if swolf_df.empty:
+                st.info("Nog geen crawlbanen in het 25m-bad voor de SWOLF-trend.")
+            else:
+                fig = px.line(
+                    swolf_df, x="start_time", y="swolf", markers=True,
+                    labels={"start_time": "Datum", "swolf": "SWOLF"},
+                )
+                fig.update_traces(
+                    marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
+                    hovertemplate="%{x|%d-%m-%Y} · SWOLF %{y:.0f}<extra></extra>",
+                )
+                fig.update_layout(
+                    title="Gemiddelde SWOLF per sessie — alleen crawl, 25m-bad "
+                          "(lager = efficiënter)")
+                chart(fig, show_legend=False)
         with c2:
             swim = swim.copy()
             swim["tempo"] = pace_as_time(swim["tempo_s_per_100m"])

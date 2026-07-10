@@ -289,7 +289,12 @@ def stroke_distribution(conn: sqlite3.Connection, activities: pd.DataFrame) -> p
 
 
 def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
-    """SWOLF en tempo per zwemsessie, voor de zwemtrend-grafiek."""
+    """SWOLF en tempo per zwemsessie, voor de zwemtrend-grafiek.
+
+    De SWOLF telt alleen crawlbanen van ~25 m mee: andere slagen en andere
+    baanlengtes geven wezenlijk andere waarden, waardoor sessies onderling
+    niet vergelijkbaar zouden zijn. Sessies zonder zulke banen krijgen None.
+    """
     swims = activities[activities["sport"] == "swimming"].copy()
     if swims.empty:
         return pd.DataFrame()
@@ -298,10 +303,14 @@ def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.D
         lengths = pd.read_sql_query(
             "SELECT * FROM lengths WHERE activity_key = ?",
             conn, params=(act["activity_key"],))
-        swolf = (
-            (lengths["total_timer_time"] + lengths["total_strokes"]).mean()
-            if not lengths.empty else None
-        )
+        swolf = None
+        if not lengths.empty:
+            meters = lane_meters(lengths, act.get("pool_length"), act.get("distance_m"))
+            crawl_25m = lengths[(lengths["swim_stroke"] == "freestyle")
+                                & ((meters - 25.0).abs() <= 1.0)]
+            if not crawl_25m.empty:
+                swolf = (crawl_25m["total_timer_time"]
+                         + crawl_25m["total_strokes"]).mean()
         # Tempo uit afstand en de zuivere zwemtijd (som van de actieve banen),
         # niet uit avg_speed_ms: dat veld ontbreekt op sommige sessies (bijv.
         # een samengevoegde zwemsessie) waardoor die anders uit de grafiek viel.
