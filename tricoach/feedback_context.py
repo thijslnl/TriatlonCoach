@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from tricoach.analysis import pace_at_hr
+from tricoach.combos import combo_block
 from tricoach.fit_parser import ParsedActivity
 from tricoach.formatting import (
     derive_speed_ms,
@@ -46,7 +47,7 @@ from tricoach.formatting import (
 )
 from tricoach.removal import section_is_deleted
 from tricoach.schedule import schedule_as_text
-from tricoach.storage import load_activities, load_lengths
+from tricoach.storage import load_activities, load_lengths, load_records
 from tricoach.trainingslog import kerncijfers, zone_regel
 from tricoach.zones import intensity_category, zone_bounds
 
@@ -540,9 +541,20 @@ def build_feedback_context(
     blocks = [
         "# Zojuist voltooide sessie\n\n"
         + session_block(act, tiz, observation, user_note, wind),
-        "# Vergelijkbare eerdere sessies (like-for-like)\n\n"
-        + similar_sessions_block(conn, act, tiz),
     ]
+    # Sluit deze sessie een brick of triatlon-training af (eerdere onderdelen
+    # van vandaag, kort ervoor, in racevolgorde)? Dan gaan de wisseltijden en
+    # de bakstenen-benen-analyse als eigen blok mee, direct na de sessie zelf.
+    combo = combo_block(conn, act, load_activities(conn), config, load_records)
+    if combo:
+        blocks.append(
+            "# Combinatietraining (brick/triatlon) — wissel- en overgangsdata\n\n"
+            + combo
+        )
+    blocks.append(
+        "# Vergelijkbare eerdere sessies (like-for-like)\n\n"
+        + similar_sessions_block(conn, act, tiz)
+    )
     tempo = pace_history_block(conn, act, z2)
     if tempo:
         blocks.append(

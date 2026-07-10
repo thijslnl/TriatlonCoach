@@ -34,6 +34,16 @@ from tricoach.analysis import (
     weekly_zone_time,
 )
 from tricoach.chat import answer_question
+from tricoach.combos import (
+    combo_history,
+    combo_membership,
+    detect_and_store_proposals,
+    load_combos,
+    max_gap_min,
+    race_similarity,
+    run_transition_analysis,
+    set_combo_status,
+)
 from tricoach.config import load_config, resolve_path
 from tricoach.feedback import generate_feedback
 from tricoach.formatting import (
@@ -123,9 +133,15 @@ STROKE_COLORS = dict(zip(
      ("freestyle", "breaststroke", "backstroke", "butterfly", "mixed", "drill", "im")],
     PAL["cats"],
 ))
-def chart(fig, show_legend: bool = True):
-    """Render een figuur in huisstijl, met de gedeelde modebar-config."""
-    st.plotly_chart(style_fig(fig, show_legend), width="stretch", config=PLOTLY_CONFIG)
+def chart(fig, show_legend: bool = True, key: str | None = None):
+    """Render een figuur in huisstijl, met de gedeelde modebar-config.
+
+    ``key`` is nodig wanneer dezelfde soort grafiek meerdere keren op een
+    pagina staat (zoals per combinatietraining): twee figuren met identieke
+    parameters krijgen anders hetzelfde auto-ID en dat laat Streamlit vallen.
+    """
+    st.plotly_chart(style_fig(fig, show_legend), width="stretch",
+                    config=PLOTLY_CONFIG, key=key)
 
 
 # Mini zoneverdeling-balk: 10 gekleurde blokjes per sessie, Z1..Z5 in oplopende
@@ -276,6 +292,13 @@ acts["Sport"] = acts["sport"].map(sport_label)
 # gebruikt door de sessietabel, de tempografieken en het sessie-detail.
 zwem_actief = swim_active_seconds(conn)
 
+# Combinatietrainingen: detecteer nieuwe brick-/triatlonvoorstellen (goedkoop,
+# alleen sessie-metadata) en haal het lidmaatschap op voor de sessietabel.
+# Voorstellen worden nooit stilzwijgend samengevoegd: bevestigen of losmaken
+# gebeurt op de 🧱 Bricks-tab.
+detect_and_store_proposals(conn, acts, max_gap_min(config))
+combo_leden = combo_membership(conn)
+
 router = LLMRouter(config, MEMORY_DIR)
 
 # Cache rond de berekeningen die alle seconde-records doorlopen: die worden
@@ -350,9 +373,11 @@ def render_upload_feedback():
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
- tab_zwemmen, tab_lichaam, tab_coach, tab_chat, tab_log, tab_settings) = st.tabs(
+ tab_zwemmen, tab_bricks, tab_lichaam, tab_coach, tab_chat, tab_log,
+ tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
-     "🏊 Zwemmen", "🧍 Lichaam", "🧠 Coach", "💬 Chat", "📖 Logboek", "⚙️ Instellingen"]
+     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🧠 Coach", "💬 Chat", "📖 Logboek",
+     "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -473,9 +498,15 @@ with tab_overzicht:
         axis=1)
     tabel["Trend"] = tabel["activity_key"].map(
         lambda k: veilig_cel(trend_cell, trend.get(k)))
+    # Onderdelen van een (voorgestelde of bevestigde) combinatietraining krijgen
+    # een marker; het samengestelde blok zelf staat op de 🧱 Bricks-tab.
+    tabel["Combo"] = tabel["activity_key"].map(
+        lambda k: ("🧱 " + combo_leden[k]["kind"]
+                   + ("?" if combo_leden[k]["status"] == "voorgesteld" else ""))
+        if k in combo_leden else "")
 
     vis = tabel[["start_time", "Sport", "Duur", "Afstand", "avg_hr",
-                 "Tempo / snelheid", "% Z2", "Zones", "Trend"]]
+                 "Tempo / snelheid", "% Z2", "Zones", "Trend", "Combo"]]
     # Kleuraccent voor de %-Z2-cel, per rij vooraf bepaald (index-gekoppeld).
     css = {idx: z2_kleur(r["pct_in_zone2"], r["z1_s"], r["z2_s"],
                          r["z3_s"], r["z4_s"], r["z5_s"])
@@ -502,6 +533,11 @@ with tab_overzicht:
                      "(zelfde sport én intensiteit). ▲ efficiënter · ▼ minder · "
                      "▬ gelijk (±2%). ⚠ = vergeleken met de dichtstbijzijnde i.p.v. een "
                      "gelijke-intensiteit sessie. Zwemmen krijgt geen pijl."),
+            "Combo": st.column_config.TextColumn(
+                "Combo",
+                help="Onderdeel van een combinatietraining (brick of "
+                     "triatlon-training). Een ? betekent: nog niet bevestigd — "
+                     "zie de 🧱 Bricks-tab."),
         },
         hide_index=True, width="stretch",
     )
@@ -1312,6 +1348,210 @@ with tab_zwemmen:
             fig.update_layout(title="Aandeel per slagtype (doel: steeds meer borstcrawl)")
             date_xaxis(fig, verdeling["start_time"])
             chart(fig)
+
+# ------------------------------------------------------------------ bricks --
+with tab_bricks:
+    st.subheader("🧱 Combinatietrainingen (bricks & triatlon-trainingen)")
+    st.caption(
+        f"Losse sessies van dezelfde dag die binnen **{max_gap_min(config)} "
+        "minuten** na elkaar starten, in racevolgorde (zwemmen → fietsen → "
+        "hardlopen), worden hier als één training voorgesteld. Twee onderdelen "
+        "= brick, drie = triatlon-training. Jij bevestigt of maakt los — er "
+        "wordt nooit stilzwijgend samengevoegd. De drempel is instelbaar in "
+        "config.yaml (combo.max_gap_min)."
+    )
+
+    SPORT_ICOON = {"swimming": "🏊", "cycling": "🚴", "running": "🏃"}
+
+    def combo_titel(combo) -> str:
+        """Kopregel van een combo-blok: soort, datum en de onderdelen."""
+        soort = ("🏊🚴🏃 Triatlon-training" if combo["kind"] == "triatlon"
+                 else "🧱 Brick")
+        delen = " → ".join(
+            f"{SPORT_ICOON[m['sport']]} {(m['distance_m'] or 0) / 1000:.1f} km"
+            for m in combo["members"])
+        return f"{soort} — {combo['start_time']:%a %d-%m-%Y}: {delen}"
+
+    def render_combo(combo):
+        """Eén combinatietraining als samengesteld blok.
+
+        Per onderdeel de kerncijfers, de wisseltijden ertussen, een totaal
+        inclusief wissels, de race-simulatievergelijking en — bij een loop na
+        het fietsen — de bakstenen-benen-analyse met tempoverloopgrafiekje.
+        """
+        members = combo["members"]
+        kolommen = st.columns(len(members) * 2 - 1)
+        for i, m in enumerate(members):
+            open_water = "open_water" in str(m.get("sub_sport") or "")
+            naam = sport_label(m["sport"]) + (" (open water)" if open_water else "")
+            hr = (f"HR gem {m['avg_hr']:.0f}"
+                  if pd.notna(m.get("avg_hr")) else "HR —")
+            kolommen[i * 2].markdown(
+                f"**{SPORT_ICOON[m['sport']]} {naam}**  \n"
+                f"{(m['distance_m'] or 0) / 1000:.2f} km · "
+                f"{fmt_duration(m['duration_s'])}  \n"
+                f"{veilig_cel(sessie_tempo, m['sport'], m['distance_m'], m['duration_s'], zwem_actief.get(m['activity_key']))}"
+                f" · {hr}")
+            if i < len(members) - 1:
+                t = combo["transitions"][i]
+                kolommen[i * 2 + 1].metric(
+                    f"⏱️ {t['label']}", fmt_duration(t["seconds"]),
+                    help="Tijd tussen het einde van het vorige onderdeel en de "
+                         "start van het volgende — oefenbare racetijd.")
+        st.markdown(
+            f"**Totaal: {fmt_duration(combo['totaal_s'])}** (incl. "
+            f"{fmt_duration(combo['wissel_s'])} wisseltijd)")
+
+        afstanden = {m["sport"]: m.get("distance_m") for m in members}
+        sim = race_similarity(afstanden, config)
+        if sim:
+            st.info(f"🏁 {sim}")
+
+        # De kern van brick-training: de loop na het fietsen. Eerste stuk vs
+        # de rest, plus het tempoverloop van de eerste kilometers.
+        for i, t in enumerate(combo["transitions"]):
+            if not (t["van"] == "cycling" and t["naar"] == "running"):
+                continue
+            run = members[i + 1]
+            rec = load_records(conn, run["activity_key"])
+            analyse = run_transition_analysis(rec)
+            if analyse:
+                e, r = analyse["eerste"], analyse["rest"]
+                c1, c2, c3 = st.columns(3)
+                c1.metric(
+                    f"Tempo {analyse['basis']} na het fietsen",
+                    fmt_duration(e["tempo_s_per_km"]) + "/km"
+                    if e["tempo_s_per_km"] else GEEN_WAARDE)
+                c2.metric(
+                    "Tempo rest van de loop",
+                    fmt_duration(r["tempo_s_per_km"]) + "/km"
+                    if r["tempo_s_per_km"] else GEEN_WAARDE,
+                    delta=(f"{e['tempo_s_per_km'] - r['tempo_s_per_km']:+.0f} "
+                           "s/km t.o.v. eerste stuk"
+                           if e["tempo_s_per_km"] and r["tempo_s_per_km"]
+                           else None),
+                    delta_color="off")
+                c3.metric(
+                    "HR eerste stuk → rest",
+                    f"{e['gem_hr']:.0f} → {r['gem_hr']:.0f}"
+                    if e["gem_hr"] and r["gem_hr"] else GEEN_WAARDE,
+                    help="Trekt het tempo na het eerste stuk aan bij gelijke "
+                         "HR, dan kwamen de 'bakstenen benen' los.")
+            splits = run_splits_df(rec, max_km=6)
+            if not splits.empty:
+                splits = splits.copy()
+                splits["Tempo"] = pace_as_time(splits["duur_s"])
+                fig = px.line(
+                    splits, x="km", y="Tempo", markers=True,
+                    custom_data=["gem_hr"],
+                    labels={"km": "Kilometer van de loop", "Tempo": "Tempo (min/km)"},
+                )
+                pace_axis(fig)
+                fig.update_traces(
+                    marker=dict(size=11),
+                    line=dict(color=SPORT_COLORS["Hardlopen"]),
+                    hovertemplate="km %{x} · %{y|%M:%S}/km · HR %{customdata[0]:.0f}"
+                                  "<extra></extra>")
+                fig.update_xaxes(dtick=1)
+                fig.update_layout(
+                    title="Tempoverloop van de loop na het fietsen "
+                          "(eerste kilometers = inlopen van de bakstenen benen)")
+                chart(fig, show_legend=False,
+                      key=f"combo_run_{combo['combo_id']}_{i}")
+
+    alle_combos = load_combos(conn, acts)
+    voorstellen = [c for c in alle_combos if c["status"] == "voorgesteld"]
+    bevestigde = [c for c in alle_combos if c["status"] == "bevestigd"]
+
+    if not alle_combos:
+        st.info(
+            "Nog geen combinatietrainingen gevonden. Upload de losse "
+            "FIT-bestanden van een brick (bijv. fietsen en direct daarna "
+            "hardlopen) en het voorstel verschijnt hier."
+        )
+
+    for combo in voorstellen:
+        with st.container(border=True):
+            st.markdown(f"#### 💡 Voorstel: {combo_titel(combo)}")
+            st.caption(
+                "Deze sessies volgen kort op elkaar in racevolgorde. Horen ze "
+                "bij elkaar als één combinatietraining?")
+            render_combo(combo)
+            knop_ja, knop_nee, _ = st.columns([1, 1, 3])
+            if knop_ja.button("✅ Ja, samen één training",
+                              key=f"combo_ok_{combo['combo_id']}", type="primary"):
+                set_combo_status(conn, combo["combo_id"], "bevestigd")
+                st.toast("Combinatietraining bevestigd — telt nu mee in de trends.")
+                st.rerun()
+            if knop_nee.button("✖️ Nee, losse trainingen",
+                               key=f"combo_nee_{combo['combo_id']}"):
+                set_combo_status(conn, combo["combo_id"], "losgemaakt")
+                st.toast("Losgemaakt — dit voorstel komt niet terug.")
+                st.rerun()
+
+    if bevestigde:
+        st.subheader("Bevestigde combinatietrainingen")
+        for combo in bevestigde:
+            with st.expander(combo_titel(combo), expanded=(combo is bevestigde[0])):
+                render_combo(combo)
+                if st.button("🔓 Losmaken (toch losse trainingen)",
+                             key=f"combo_los_{combo['combo_id']}"):
+                    set_combo_status(conn, combo["combo_id"], "losgemaakt")
+                    st.toast("Losgemaakt — deze groep komt niet opnieuw als voorstel.")
+                    st.rerun()
+
+    # ---- Trends over de bevestigde combos: worden de wissels korter en de
+    # ---- overgang soepeler? Dat is de kernmaat van brick-training.
+    historie = combo_history(conn, acts, load_records)
+    if len(historie) >= 2:
+        st.subheader("Trend over je combinatietrainingen")
+        c1, c2 = st.columns(2)
+        with c1:
+            wissels = historie.melt(
+                id_vars=["start_time"], value_vars=["t1_s", "t2_s"],
+                var_name="wissel", value_name="seconden").dropna(subset=["seconden"])
+            if not wissels.empty:
+                wissels["Wissel"] = wissels["wissel"].map(
+                    {"t1_s": "T1 (zwem → fiets)", "t2_s": "T2 (fiets → loop)"})
+                wissels["Tijd"] = pace_as_time(wissels["seconden"])
+                fig = px.line(
+                    wissels, x="start_time", y="Tijd", color="Wissel", markers=True,
+                    color_discrete_map={"T1 (zwem → fiets)": PAL["cats"][0],
+                                        "T2 (fiets → loop)": PAL["cats"][2]},
+                    labels={"start_time": "Datum", "Tijd": "Wisseltijd (min)"},
+                )
+                fig.update_yaxes(tickformat="%M:%S")
+                fig.update_traces(
+                    marker=dict(size=11),
+                    hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: "
+                                  "%{y|%M:%S}<extra></extra>")
+                fig.update_layout(title="Wisseltijden per training (korter = beter)")
+                date_xaxis(fig, wissels["start_time"])
+                chart(fig)
+        with c2:
+            delta = historie.dropna(subset=["delta_tempo_s_per_km"])
+            if not delta.empty:
+                fig = px.line(
+                    delta, x="start_time", y="delta_tempo_s_per_km", markers=True,
+                    custom_data=["delta_hr"],
+                    labels={"start_time": "Datum",
+                            "delta_tempo_s_per_km": "Eerste stuk t.o.v. rest (s/km)"},
+                )
+                fig.update_traces(
+                    marker=dict(size=11), line=dict(color=SPORT_COLORS["Hardlopen"]),
+                    hovertemplate="%{x|%d-%m-%Y} · eerste stuk %{y:+.0f} s/km "
+                                  "t.o.v. de rest<extra></extra>")
+                fig.add_hline(y=0, line_dash="dash", line_color=PAL["ref_line"])
+                fig.update_layout(
+                    title="Hoe zwaar was de start van de loop na het fietsen? "
+                          "(dichter bij 0 = soepelere overgang)")
+                date_xaxis(fig, delta["start_time"])
+                chart(fig, show_legend=False)
+        st.caption(
+            "Beide grafieken tellen alleen **bevestigde** combinatietrainingen. "
+            "Worden de wisseltijden korter en zakt het tempoverschil van het "
+            "eerste stuk richting 0, dan werpt de brick-training vruchten af."
+        )
 
 # ----------------------------------------------------------------- lichaam --
 with tab_lichaam:

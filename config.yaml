@@ -13,14 +13,24 @@ athlete:
   training_days: Zwemmen ma/vr-ochtend, optioneel vr-avond, lange duurtraining zondag
   session_time: 30-45 min doordeweeks, 1,5-2 uur op zondag
 races:
-- name: Standaard triatlon
-  date: 2027-05-01
-  swim_m: null
-  bike_m: null
-  run_m: null
+- name: DTS Ouderkerk
+  date: 2026-08-22
+  swim_m: 1500
+  bike_m: 40000
+  run_m: 10000
   distances: 1,5km zwemmen / 40km fietsen / 10km lopen
   goal: Goed finishen (eerste race)
   target_time: ''
+- name: Ironman 70.3
+  date: 2027-06-01
+  swim_m: 1900
+  bike_m: 90000
+  run_m: 21100
+  distances: 1,9km zwemmen / 90km fietsen / 21,1km lopen
+  goal: Goed finishen
+  target_time: ''
+combo:
+  max_gap_min: 25
 llm:
   ollama:
     host: http://192.168.50.120:11434
