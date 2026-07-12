@@ -100,6 +100,19 @@ SYSTEM = (
     "- Hardlopen: zone 2-discipline is centraal. HR-drift (eerste vs tweede "
     "helft) als vermoeidheids-/herstelmaat; tempo bij gelijke HR als "
     "voortgang. Beloon rustig blijven, signaleer te hard gaan.\n"
+    "- Loopdynamiek (cadans, staplengte, grondcontacttijd, verticale ratio): "
+    "dit is LANGETERMIJN-context, geen beoordelingsmaat voor een losse "
+    "sessie. Cadans is een middel (loopeconomie, blessurebestendigheid), "
+    "geen doel; de bekende 180-regel geldt niet voor rustig duurlooptempo. "
+    "Benoem hooguit één rustige observatie over de trend over weken/maanden "
+    "en presenteer een lage cadans of lange grondcontacttijd nooit als fout "
+    "van vandaag. Bewust cadanswerk is iets voor ná de eerste race — stel "
+    "het niet voor als aanpassing zolang die nog voor de deur staat.\n"
+    "- Sessies met label 'techniek/cadans': de atleet oefende bewust een "
+    "hogere cadans. Een hogere hartslag is dan verwacht (onwennig "
+    "bewegingspatroon, went vanzelf) en is GEEN te hard trainen of mislukte "
+    "zone 2-sessie — schrijf de hogere HR expliciet aan het techniekwerk toe "
+    "en beoordeel op het techniekdoel.\n"
     "- Fietsen: zone 2-discipline is centraal. Weeg altijd wind en klim mee "
     "vóór een oordeel over snelheid; snelheid bij gelijke HR als efficiëntie. "
     "Beloon rustig blijven.\n"
@@ -223,10 +236,12 @@ def generate_feedback(
     observation: str | None,
     user_note: str | None = None,
     wind: "object | None" = None,
+    training_label: str | None = None,
 ) -> Feedback:
     """Genereer en bewaar de coaching-feedback voor één zojuist geïmporteerde sessie.
 
-    ``user_note`` (de opmerking bij de upload) en ``wind`` (Open-Meteo, incl.
+    ``user_note`` (de opmerking bij de upload), ``training_label`` (het
+    sessielabel, bijv. "techniek/cadans") en ``wind`` (Open-Meteo, incl.
     temperatuur) gaan als meegewogen context mee naar het model en worden in
     feedback.md vastgelegd. Een voorgestelde aanpassing wordt daarnaast als
     'Sessie-advies' in adviezen.md gezet.
@@ -234,6 +249,7 @@ def generate_feedback(
     context = build_feedback_context(
         conn, memory_dir, config, act, tiz,
         observation=observation, user_note=user_note, wind=wind,
+        training_label=training_label,
     )
     raw = router.ask("feedback", context, system=SYSTEM)
     feedback_text, aanpassing = _parse_reply(raw)
@@ -247,7 +263,8 @@ def generate_feedback(
         feedback=feedback_text,
         aanpassing=aanpassing,
     )
-    _append_feedback_md(memory_dir, act, fb, user_note=user_note, wind=wind)
+    _append_feedback_md(memory_dir, act, fb, user_note=user_note, wind=wind,
+                        training_label=training_label)
     if aanpassing:
         _append_advies_md(memory_dir, act, aanpassing)
     return fb
@@ -259,6 +276,7 @@ def _append_feedback_md(
     fb: Feedback,
     user_note: str | None = None,
     wind: "object | None" = None,
+    training_label: str | None = None,
 ) -> None:
     """Leg de feedback vast in memory/feedback.md (nieuwste onderaan).
 
@@ -276,6 +294,8 @@ def _append_feedback_md(
         entry += f"- **Wind (Open-Meteo):** {wind.as_text()}\n"
     if user_note:
         entry += f"- **Opmerking atleet:** {user_note}\n"
+    if training_label:
+        entry += f"- **Sessielabel:** {training_label}\n"
     entry += (
         f"- **Feedback:** {fb.feedback}\n"
         f"- **Voorgestelde aanpassing:** {fb.aanpassing or 'Geen — volgende sessie zoals gepland'}\n"

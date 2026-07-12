@@ -64,12 +64,14 @@ def append_entry(
     observation: str | None = None,
     user_note: str | None = None,
     wind: "object | None" = None,
+    training_label: str | None = None,
 ) -> None:
     """Voeg één sessie-entry toe aan memory/trainingslog.md.
 
-    ``user_note`` is de vrije opmerking bij de upload en ``wind`` de
-    automatisch opgehaalde Open-Meteo-winddata (een ``WindData`` met
-    ``as_text()``); beide optioneel en worden alleen vermeld als ze er zijn.
+    ``user_note`` is de vrije opmerking bij de upload, ``wind`` de automatisch
+    opgehaalde Open-Meteo-winddata (een ``WindData`` met ``as_text()``) en
+    ``training_label`` het sessielabel (bijv. "techniek/cadans"); alle drie
+    optioneel en worden alleen vermeld als ze er zijn.
     """
     log_path = memory_dir / "trainingslog.md"
     if not log_path.exists():
@@ -85,6 +87,8 @@ def append_entry(
         entry += f"- **Wind (Open-Meteo):** {wind.as_text()}\n"
     if user_note:
         entry += f"- **Opmerking:** {user_note}\n"
+    if training_label:
+        entry += f"- **Label:** {training_label}\n"
     entry += f"- _Sleutel `{act.activity_key}` · bron `{act.source_file}`_\n"
 
     with open(log_path, "a", encoding="utf-8") as f:

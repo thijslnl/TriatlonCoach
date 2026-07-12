@@ -8,6 +8,7 @@ dezelfde import-pipeline als de commandline (tricoach.importer).
 """
 
 import copy
+import json
 from datetime import date, timedelta
 
 import pandas as pd
@@ -52,7 +53,6 @@ from tricoach.formatting import (
     fmt_duration,
     fmt_hours_hhmm,
     local_time,
-    run_cadence_spm,
     sessie_tempo,
     sport_label,
     stroke_label,
@@ -73,6 +73,14 @@ from tricoach.progress import (
     swim_progression,
 )
 from tricoach.importer import import_zip
+from tricoach.rundynamics import (
+    CADENCE_GUIDE_SPM,
+    GCT_TRAINED_MS,
+    VERTICAL_RATIO_GOOD_PCT,
+    dynamics_from_summary,
+    dynamics_trend,
+    vertical_ratio_is_good,
+)
 from tricoach.llm import LLMRouter
 from tricoach.llm.log import usage_summary
 from tricoach.llm.observations import session_observation
@@ -98,6 +106,7 @@ from tricoach.storage import (
     load_lengths,
     load_records,
     recompute_zones,
+    set_training_label,
     swim_active_seconds,
 )
 from tricoach.weather import wind_for_activity
@@ -231,6 +240,20 @@ with st.sidebar:
         help="Vrije context bij deze upload. De coach weegt dit mee bij de "
              "feedback en het wordt bij de sessie bewaard.",
     )
+    # Sessielabel: een techniek-/cadanssessie hoort een hogere hartslag te
+    # mogen hebben zonder dat de coach "te hard getraind" oordeelt.
+    UPLOAD_LABELS = {
+        "Geen label (normale sessie)": None,
+        "Techniek/cadans — bewust op hogere cadans gelopen": "techniek/cadans",
+    }
+    label_keuze = st.selectbox(
+        "Sessielabel (optioneel)", list(UPLOAD_LABELS),
+        help="Bij 'techniek/cadans' weet de coach dat een hogere hartslag "
+             "bij het oefenen hoort en beoordeelt hij de sessie niet als "
+             "te hard getraind. Geldt voor alle sessies in deze upload; "
+             "achteraf aan te passen op de 🔍 Sessie-tab.",
+    )
+    upload_label = UPLOAD_LABELS[label_keuze]
     start_upload = st.button(
         "🚀 Uploaden en analyseren", type="primary", disabled=not uploads,
         use_container_width=True,
@@ -247,6 +270,7 @@ with st.sidebar:
                     observation_fn=lambda act, tiz: session_observation(router_upload, act, tiz),
                     weather_fn=lambda act: wind_for_activity(act, MEMORY_DIR),
                     user_note=user_note,
+                    training_label=upload_label,
                 )
                 for r in results:
                     icon = {"nieuw": "✅", "duplicaat": "↩️"}.get(r.status, "🗑️")
@@ -256,6 +280,10 @@ with st.sidebar:
                         st.caption(
                             "Deze sessie is eerder verwijderd en blijft verwijderd. "
                             "Herstellen kan via ⚙️ Instellingen → Verwijderde sessies.")
+                    if r.enriched:
+                        st.caption(
+                            "📈 Aangevuld met velden die bij de eerdere import "
+                            "nog niet werden opgeslagen (o.a. loopdynamiek).")
                     if r.status == "nieuw" and r.wind is not None:
                         st.caption(f"🌬️ Wind: {r.wind.as_text()}")
                     # Alleen nieuwe sessies krijgen coaching-feedback (Sonnet);
@@ -266,6 +294,7 @@ with st.sidebar:
                                 router_upload, conn, MEMORY_DIR, config,
                                 r.activity, r.tiz, r.observation,
                                 user_note=r.user_note, wind=r.wind,
+                                training_label=r.training_label,
                             )
                             verse_feedback.append(fb)
                         except Exception as e:
@@ -998,6 +1027,56 @@ with tab_sessie:
               help="Gemiddelde hartslag van de tweede helft minus de eerste helft. "
                    "Duidelijk oplopend = vermoeidheid of een te hoog begintempo.")
 
+    if sessie["sport"] == "running":
+        # Loopdynamiek van deze sessie (zelfde getallen als Garmin Connect;
+        # cadans als totale stappen per minuut). Oudere imports missen de
+        # meeste velden tot de zip opnieuw is geüpload.
+        try:
+            dyn = dynamics_from_summary(json.loads(sessie.get("summary_json") or "{}"))
+        except (TypeError, ValueError):
+            dyn = {}
+        if any(v is not None for v in dyn.values()):
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Cadans",
+                      f"{dyn['cadans_spm']:.0f} spm" if dyn.get("cadans_spm") else GEEN_WAARDE,
+                      help="Totale stappen per minuut (beide benen), zoals "
+                           "Garmin Connect. Je eigen trend telt; de richtlijn "
+                           f"voor rustig duurlooptempo ({CADENCE_GUIDE_SPM[0]}–"
+                           f"{CADENCE_GUIDE_SPM[1]}) is geen norm.")
+            k2.metric("Staplengte",
+                      f"{dyn['staplengte_m']:.2f} m" if dyn.get("staplengte_m") else GEEN_WAARDE,
+                      help="Hangt samen met de cadans: hogere cadans bij gelijk "
+                           "tempo = kortere pas.")
+            k3.metric("Grondcontacttijd",
+                      f"{dyn['gct_ms']:.0f} ms" if dyn.get("gct_ms") else GEEN_WAARDE,
+                      help="Korter = efficiënter; daalt vanzelf mee als de "
+                           "cadans over de maanden stijgt.")
+            ratio = dyn.get("vert_ratio_pct")
+            k4.metric("Verticale ratio",
+                      f"{ratio:.1f}%" + (" ✓" if vertical_ratio_is_good(ratio) else "")
+                      if ratio is not None else GEEN_WAARDE,
+                      help=f"Onder {VERTICAL_RATIO_GOOD_PCT:.0f}% is prima — "
+                           "het vinkje betekent: hier valt niets te verbeteren.")
+
+    # Sessielabel (achteraf) instellen of weghalen: een techniek-/cadanssessie
+    # mag een hogere hartslag hebben zonder als te hard getraind te gelden.
+    SESSIE_LABELS = ["(geen)", "techniek/cadans"]
+    huidig_label = sessie.get("training_label")
+    if huidig_label is None or (isinstance(huidig_label, float) and pd.isna(huidig_label)):
+        huidig_label = "(geen)"
+    nieuw_label = st.selectbox(
+        "🏷️ Sessielabel", SESSIE_LABELS,
+        index=SESSIE_LABELS.index(huidig_label) if huidig_label in SESSIE_LABELS else 0,
+        key=f"label_{gekozen}",
+        help="'techniek/cadans' = bewuste cadans-oefensessie; de coach weet "
+             "dan dat een hogere hartslag bij het oefenen hoort. Wijzigingen "
+             "gelden voor toekomstige feedback en analyses.",
+    )
+    if nieuw_label != huidig_label:
+        set_training_label(conn, gekozen, None if nieuw_label == "(geen)" else nieuw_label)
+        st.toast(f"Sessielabel bijgewerkt: {nieuw_label}")
+        st.rerun()
+
     # Verwijderen is een soft delete met expliciete bevestiging: één misklik
     # kost geen data, en herstellen kan altijd via de instellingen-tab.
     with st.expander("🗑️ Deze sessie verwijderen"):
@@ -1127,7 +1206,10 @@ with tab_lopen:
     else:
         runs = runs.copy()
         runs["tempo"] = pace_as_time(1000 / runs["avg_speed_ms"])
-        runs["cadans_spm"] = runs["avg_cadence"].map(run_cadence_spm)
+        # Loopdynamiek per sessie uit summary_json: cadans (spm, incl. de
+        # fractie zodat het getal exact met Garmin Connect overeenkomt),
+        # staplengte, grondcontacttijd en verticale ratio.
+        dynamiek = dynamics_trend(runs)
         c1, c2 = st.columns(2)
         with c1:
             fig = px.scatter(
@@ -1146,22 +1228,132 @@ with tab_lopen:
             fig.update_layout(title="Tempo per sessie (kleur = gemiddelde hartslag)")
             chart(fig, show_legend=False)
         with c2:
+            cad = dynamiek.dropna(subset=["cadans_spm"])
             fig = px.line(
-                runs, x="start_time", y="cadans_spm", markers=True,
+                cad, x="start_time", y="cadans_spm", markers=True,
                 labels={"start_time": "Datum", "cadans_spm": "Cadans (stappen/min)"},
             )
             fig.update_traces(
                 marker=dict(size=11), line=dict(color=SPORT_COLORS["Hardlopen"]),
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} stappen/min<extra></extra>",
             )
-            # Richtbereik voor duurlopen; lager wijst vaak op overstriding.
-            fig.add_hrect(y0=170, y1=180, line_width=0,
-                          fillcolor=with_alpha(PAL["zones"][1], 0.15),
-                          annotation_text="richtbereik 170–180",
+            # Zachte richtlijn voor rustig duurlooptempo, bewust in neutraal
+            # grijs: de eigen trend is de maat, niet dit gebied. De oude,
+            # harde 170–180-band kwam van de elite-"180-regel" en was voor
+            # rustig zone 2-werk verkeerd gekalibreerd.
+            fig.add_hrect(y0=CADENCE_GUIDE_SPM[0], y1=CADENCE_GUIDE_SPM[1],
+                          line_width=0,
+                          fillcolor=with_alpha(PAL["muted"], 0.15),
+                          annotation_text=f"richtlijn duurloop "
+                                          f"{CADENCE_GUIDE_SPM[0]}–{CADENCE_GUIDE_SPM[1]} "
+                                          f"(geen norm)",
                           annotation_position="top left",
                           annotation_font_color=PAL["muted"])
-            fig.update_layout(title="Cadans per sessie")
+            fig.update_layout(title="Cadans per sessie (totale stappen/min, als Garmin Connect)")
             chart(fig, show_legend=False)
+            st.caption(
+                "Je eigen trend is hier de maat. Het grijze gebied is een "
+                "zachte richtlijn voor rústig duurlooptempo — geen norm, en "
+                "bewust niet de bekende 170–180-\"regel\", die van "
+                "elite-lopers op wedstrijdtempo komt. Cadans is een middel "
+                "(loopeconomie, blessurebestendigheid), geen doel: geleidelijk "
+                "(~+5% per paar weken) is genoeg, en dit is iets voor ná "
+                "Ouderkerk (22 augustus) — vlak voor een race geen nieuw "
+                "looppatroon inslijpen."
+            )
+
+        st.subheader("Loopdynamiek")
+        st.caption(
+            "Trendcijfers van het horloge om over máánden te volgen, niet om "
+            "nu op te sturen. Let op: bewust op hogere cadans lopen maakt de "
+            "hartslag tijdelijk hoger (onwennig patroon) — dat is normaal en "
+            "geen te hard trainen. Label zo'n sessie bij de upload als "
+            "'techniek/cadans', dan weegt de coach dat mee."
+        )
+        heeft_dynamiek = (not dynamiek.empty and dynamiek[
+            ["staplengte_m", "gct_ms", "vert_ratio_pct"]].notna().any().any())
+        if not heeft_dynamiek:
+            st.info(
+                "Nog geen loopdynamiek-velden in de database. Die zitten wel "
+                "in je FIT-bestanden, maar werden bij eerdere imports niet "
+                "opgeslagen: upload je Garmin-zips gewoon opnieuw — duplicaten "
+                "worden niet dubbel geteld, alleen aangevuld."
+            )
+        else:
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                stap = dynamiek.dropna(subset=["staplengte_m"])
+                if not stap.empty:
+                    fig = px.line(
+                        stap, x="start_time", y="staplengte_m", markers=True,
+                        labels={"start_time": "Datum", "staplengte_m": "Staplengte (m)"},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=10), line=dict(color=SPORT_COLORS["Hardlopen"]),
+                        hovertemplate="%{x|%d-%m-%Y} · %{y:.2f} m<extra></extra>")
+                    fig.update_layout(title="Staplengte per sessie")
+                    date_xaxis(fig, stap["start_time"])
+                    pad_single_point(fig, stap["start_time"])
+                    chart(fig, show_legend=False)
+                    st.caption(
+                        "Context bij de cadans: bij gelijk tempo en een hogere "
+                        "cadans wordt de pas vanzelf korter — een dalende lijn "
+                        "is hier dus geen achteruitgang."
+                    )
+            with d2:
+                gct = dynamiek.dropna(subset=["gct_ms"])
+                if not gct.empty:
+                    fig = px.line(
+                        gct, x="start_time", y="gct_ms", markers=True,
+                        labels={"start_time": "Datum", "gct_ms": "Grondcontacttijd (ms)"},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=10), line=dict(color=SPORT_COLORS["Hardlopen"]),
+                        hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} ms<extra></extra>")
+                    fig.add_hrect(y0=GCT_TRAINED_MS[0], y1=GCT_TRAINED_MS[1],
+                                  line_width=0,
+                                  fillcolor=with_alpha(PAL["muted"], 0.15),
+                                  annotation_text=f"geoefend: {GCT_TRAINED_MS[0]}–"
+                                                  f"{GCT_TRAINED_MS[1]} ms (referentie)",
+                                  annotation_position="bottom left",
+                                  annotation_font_color=PAL["muted"])
+                    fig.update_layout(title="Grondcontacttijd per sessie")
+                    date_xaxis(fig, gct["start_time"])
+                    pad_single_point(fig, gct["start_time"])
+                    chart(fig, show_legend=False)
+                    st.caption(
+                        "Korter = efficiënter. Hangt samen met de cadans: gaat "
+                        "die over de maanden omhoog, dan zakt dit vanzelf mee. "
+                        "Volg de trend, forceer niets."
+                    )
+            with d3:
+                ratio = dynamiek.dropna(subset=["vert_ratio_pct"])
+                if not ratio.empty:
+                    fig = px.line(
+                        ratio, x="start_time", y="vert_ratio_pct", markers=True,
+                        labels={"start_time": "Datum",
+                                "vert_ratio_pct": "Verticale ratio (%)"},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=10), line=dict(color=SPORT_COLORS["Hardlopen"]),
+                        hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}%<extra></extra>")
+                    # Groene band: onder ~8% is dit gewoon goed — expliciet,
+                    # zodat de grafiek niet iets suggereert dat beter moet.
+                    fig.add_hrect(y0=0, y1=VERTICAL_RATIO_GOOD_PCT, line_width=0,
+                                  fillcolor=with_alpha(PAL["zones"][1], 0.15),
+                                  annotation_text=f"prima (< {VERTICAL_RATIO_GOOD_PCT:.0f}%)",
+                                  annotation_position="bottom left",
+                                  annotation_font_color=PAL["muted"])
+                    fig.update_yaxes(rangemode="tozero")
+                    fig.update_layout(title="Verticale ratio per sessie")
+                    date_xaxis(fig, ratio["start_time"])
+                    pad_single_point(fig, ratio["start_time"])
+                    chart(fig, show_legend=False)
+                    st.caption(
+                        "Verticale beweging t.o.v. de staplengte — in het "
+                        "groene gebied zit dit gewoon goed en valt er niets "
+                        "te verbeteren."
+                    )
 
         inspanningen = cache_best_efforts(DATA_VERSIE)
         if not inspanningen.empty:
@@ -1198,7 +1390,10 @@ with tab_lopen:
             st.caption(
                 "Genormaliseerd vermogen (watt), door het horloge aan de pols "
                 "geschat — indicatief, maar consistent tussen sessies. Stijgend "
-                "vermogen bij gelijke hartslag wijst op groeiende fitheid."
+                "vermogen bij gelijke hartslag wijst op groeiende fitheid. "
+                "Kanttekening: loopvermogen is een onrijpe, merk-afhankelijke "
+                "maat — aardig om te volgen, geen stuurmiddel. Sturen doe je "
+                "op hartslag."
             )
             fig = px.line(
                 vermogen, x="start_time", y="watt", markers=True,

@@ -81,6 +81,14 @@ SESSION_FIELDS = [
     "avg_heart_rate", "max_heart_rate",
     "enhanced_avg_speed", "avg_speed", "enhanced_max_speed", "max_speed",
     "avg_cadence", "max_cadence", "avg_running_cadence",
+    # Loopdynamiek (Forerunner 265): cadans-fractie (rpm, ×2 erbij voor het
+    # exacte spm-getal van Garmin Connect), staplengte (mm), grondcontacttijd
+    # (ms), verticale oscillatie (mm) en verticale ratio (%). fitdecode heeft
+    # de FIT-schaalfactoren dan al toegepast; omrekenen naar weergave-eenheden
+    # gebeurt in tricoach.rundynamics.
+    "avg_fractional_cadence",
+    "avg_step_length", "avg_stance_time", "avg_stance_time_percent",
+    "avg_vertical_oscillation", "avg_vertical_ratio",
     "total_ascent", "total_descent",
     "total_calories", "normalized_power", "avg_power",
     # zwemspecifiek

@@ -46,6 +46,7 @@ from tricoach.formatting import (
     sport_label,
 )
 from tricoach.removal import section_is_deleted
+from tricoach.rundynamics import dynamics_block
 from tricoach.schedule import schedule_as_text
 from tricoach.storage import load_activities, load_lengths, load_records
 from tricoach.trainingslog import kerncijfers, zone_regel
@@ -231,8 +232,15 @@ def session_block(
     observation: str | None,
     user_note: str | None,
     wind: "object | None",
+    training_label: str | None = None,
 ) -> str:
-    """Het volledige beeld van de zojuist voltooide sessie."""
+    """Het volledige beeld van de zojuist voltooide sessie.
+
+    ``training_label`` is het sessielabel van de atleet; bij een
+    techniek-/cadanssessie gaat de uitleg mee dat een hogere hartslag daar
+    verwacht en oké is, zodat de coach de sessie niet als "te hard getraind"
+    beoordeelt.
+    """
     s = act.summary
     total = sum(tiz.values()) or 1
     shares = " · ".join(f"{z} {v / total * 100:.0f}%" for z, v in tiz.items() if v > 0)
@@ -278,6 +286,17 @@ def session_block(
     if observation:
         regels.append(f"- Beschrijvende observatie (lokaal model): {observation}")
     regels.append(f"- Opmerking van de atleet bij de upload: {user_note or '(geen)'}")
+    if training_label:
+        regel = f"- Sessielabel van de atleet: {training_label}"
+        if "techniek" in training_label.lower() or "cadans" in training_label.lower():
+            regel += (
+                " — bewuste techniek-/cadanssessie. Een hogere hartslag dan "
+                "normaal is hierbij VERWACHT (onwennig bewegingspatroon, went "
+                "vanzelf) en is géén te hard trainen of slechte zone "
+                "2-uitvoering. Beoordeel deze sessie op het techniekdoel, "
+                "niet op zone 2-discipline."
+            )
+        regels.append(regel)
     return "\n".join(regels)
 
 
@@ -533,6 +552,7 @@ def build_feedback_context(
     observation: str | None = None,
     user_note: str | None = None,
     wind: "object | None" = None,
+    training_label: str | None = None,
 ) -> str:
     """Bouw de volledige prompt-context voor de feedback op één sessie."""
     bounds = zone_bounds(config["athlete"])
@@ -540,8 +560,18 @@ def build_feedback_context(
 
     blocks = [
         "# Zojuist voltooide sessie\n\n"
-        + session_block(act, tiz, observation, user_note, wind),
+        + session_block(act, tiz, observation, user_note, wind, training_label),
     ]
+    # Loopdynamiek gaat als apart, expliciet als langetermijn gemarkeerd blok
+    # mee: cadans/grondcontacttijd zijn een project voor ná de eerste race en
+    # mogen nooit een sessie-oordeel kleuren.
+    if act.sport == "running":
+        dyn = dynamics_block(act.summary, _prev_activities(conn, act))
+        if dyn:
+            blocks.append(
+                "# Loopdynamiek (alleen langetermijncontext — geen "
+                "beoordelingsmaat voor deze sessie)\n\n" + dyn
+            )
     # Sluit deze sessie een brick of triatlon-training af (eerdere onderdelen
     # van vandaag, kort ervoor, in racevolgorde)? Dan gaan de wisseltijden en
     # de bakstenen-benen-analyse als eigen blok mee, direct na de sessie zelf.

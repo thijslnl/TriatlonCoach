@@ -3,7 +3,9 @@
 Dit is de ene plek waar een upload doorheen gaat, zowel vanuit het dashboard
 als vanuit de commandline. Deduplicatie gebeurt hier: een activiteit die al
 in de database staat wordt overgeslagen (en komt dus ook niet nogmaals in
-het trainingslog).
+het trainingslog). Een duplicaat is niet helemaal voor niets: ontbrekende
+summary-velden (zoals de loopdynamiek van sessies die vóór die uitbreiding
+zijn geïmporteerd) worden dan alsnog aangevuld uit het FIT-bestand.
 """
 
 import sqlite3
@@ -12,7 +14,12 @@ from pathlib import Path
 from typing import Callable
 
 from tricoach.fit_parser import ParsedActivity, parse_zip
-from tricoach.storage import activity_exists, is_deleted, save_activity
+from tricoach.storage import (
+    activity_exists,
+    enrich_activity_summary,
+    is_deleted,
+    save_activity,
+)
 from tricoach.trainingslog import append_entry
 from tricoach.weather import WindData
 from tricoach.zones import time_in_zones, zone_bounds
@@ -34,8 +41,11 @@ class ImportResult:
     ``tiz`` en ``observation`` zijn gemma's voorwerk (tijd-in-zones en de korte
     observatie) en worden meegegeven zodat de feedback-stap erop kan voortbouwen
     zonder Ollama nog eens aan te roepen. ``user_note`` (de opmerking bij de
-    upload) en ``wind`` (Open-Meteo) reizen mee zodat de feedback-stap ze als
-    context kan meewegen. Bij een duplicaat blijven ze leeg.
+    upload), ``training_label`` (het sessielabel van de atleet, bijv.
+    "techniek/cadans") en ``wind`` (Open-Meteo) reizen mee zodat de
+    feedback-stap ze als context kan meewegen. Bij een duplicaat blijven ze
+    leeg; ``enriched`` is dan True als de herimport ontbrekende summary-velden
+    heeft aangevuld.
     """
 
     activity: ParsedActivity
@@ -43,7 +53,9 @@ class ImportResult:
     tiz: dict[str, int] = field(default_factory=dict)
     observation: str | None = None
     user_note: str | None = None
+    training_label: str | None = None
     wind: "WindData | None" = None
+    enriched: bool = False
 
 
 def import_zip(
@@ -54,16 +66,20 @@ def import_zip(
     observation_fn: ObservationFn | None = None,
     weather_fn: WeatherFn | None = None,
     user_note: str | None = None,
+    training_label: str | None = None,
 ) -> list[ImportResult]:
     """Importeer alle FIT-activiteiten uit één zip. Geeft per activiteit de status terug.
 
-    ``user_note`` wordt bij elke nieuwe sessie uit deze zip opgeslagen en in het
-    trainingslog vermeld. ``weather_fn`` haalt de winddata op (Open-Meteo);
-    beide zijn optioneel. Duplicaten worden vóór elke LLM-/API-aanroep
-    afgevangen, zodat een tweede upload geen onnodige calls kost.
+    ``user_note`` en ``training_label`` worden bij elke nieuwe sessie uit deze
+    zip opgeslagen en in het trainingslog vermeld. ``weather_fn`` haalt de
+    winddata op (Open-Meteo); alles is optioneel. Duplicaten worden vóór elke
+    LLM-/API-aanroep afgevangen, zodat een tweede upload geen onnodige calls
+    kost — wel worden bij een duplicaat ontbrekende summary-velden aangevuld
+    (zo krijgt een herupload van oude zips de loopdynamiek alsnog binnen).
     """
     bounds = zone_bounds(config["athlete"])
     note = (user_note or "").strip() or None
+    label = (training_label or "").strip() or None
     results = []
 
     for act in parse_zip(zip_path):
@@ -72,17 +88,21 @@ def import_zip(
         # de status "verwijderd" laat de UI uitleggen hoe je hem kunt herstellen.
         if activity_exists(conn, act.activity_key):
             status = "verwijderd" if is_deleted(conn, act.activity_key) else "duplicaat"
-            results.append(ImportResult(act, status))
+            enriched = enrich_activity_summary(conn, act)
+            results.append(ImportResult(act, status, enriched=enriched))
             continue
 
         tiz = time_in_zones(act.records, bounds) if not act.records.empty else {}
         observation = observation_fn(act, tiz) if observation_fn else None
         wind = weather_fn(act) if weather_fn else None
 
-        save_activity(conn, act, bounds, user_note=note, wind=wind)
-        append_entry(memory_dir, act, tiz, observation, user_note=note, wind=wind)
+        save_activity(conn, act, bounds, user_note=note, wind=wind,
+                      training_label=label)
+        append_entry(memory_dir, act, tiz, observation, user_note=note,
+                     wind=wind, training_label=label)
         results.append(ImportResult(
-            act, "nieuw", tiz=tiz, observation=observation, user_note=note, wind=wind,
+            act, "nieuw", tiz=tiz, observation=observation, user_note=note,
+            training_label=label, wind=wind,
         ))
 
     return results

@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS activities (
     pct_in_zone2       REAL,
     aerobic_efficiency REAL,
     user_note      TEXT,
+    training_label TEXT,
     wind_speed     REAL,
     wind_direction REAL,
     wind_gusts     REAL,
@@ -104,6 +105,10 @@ _ADDED_COLUMNS = {
     "wind_gusts": "REAL",
     # Temperatuur tijdens de sessie (Open-Meteo), voor de feedback-context.
     "temperature_c": "REAL",
+    # Sessielabel van de atleet, bijv. "techniek/cadans": een bewuste
+    # cadans-oefensessie waarbij een hogere hartslag verwacht en oké is.
+    # De feedback weegt dit mee; NULL = gewoon een normale sessie.
+    "training_label": "TEXT",
     # Soft delete: gevuld = de sessie is verwijderd en telt nergens meer mee,
     # maar de rij blijft staan zodat de dedup op activity_key intact blijft
     # en herstellen mogelijk is.
@@ -166,12 +171,15 @@ def save_activity(
     zone_bounds: list[int],
     user_note: str | None = None,
     wind: "WindData | None" = None,
+    training_label: str | None = None,
 ) -> bool:
     """Sla één activiteit op. Geeft False terug als hij al bestond (dedup).
 
     ``user_note`` is de vrije opmerking die de gebruiker bij de upload typte
     (optioneel). ``wind`` is de automatisch opgehaalde Open-Meteo-winddata
     (optioneel; ``None`` bij zwemmen, geen GPS of geen internet).
+    ``training_label`` is het sessielabel van de atleet (bijv.
+    "techniek/cadans"); None = normale sessie.
     """
     if activity_exists(conn, act.activity_key):
         return False
@@ -196,9 +204,10 @@ def save_activity(
                pool_length, num_lengths, total_strokes,
                z1_s, z2_s, z3_s, z4_s, z5_s,
                pct_in_zone2, aerobic_efficiency,
-               user_note, wind_speed, wind_direction, wind_gusts, temperature_c,
+               user_note, training_label,
+               wind_speed, wind_direction, wind_gusts, temperature_c,
                summary_json, source_file, imported_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             act.activity_key, act.sport, act.sub_sport, act.start_time.isoformat(),
             s.get("total_timer_time"), s.get("total_distance"),
@@ -212,6 +221,7 @@ def save_activity(
             tiz["Z1"], tiz["Z2"], tiz["Z3"], tiz["Z4"], tiz["Z5"],
             pct_z2, eff,
             ((user_note or "").strip() or None),
+            ((training_label or "").strip() or None),
             wind.speed_kmh if wind else None,
             wind.direction_deg if wind else None,
             wind.gusts_kmh if wind else None,
@@ -249,6 +259,55 @@ def save_activity(
 
     conn.commit()
     return True
+
+
+def enrich_activity_summary(conn: sqlite3.Connection, act: ParsedActivity) -> bool:
+    """Vul ontbrekende summary-velden van een al geïmporteerde sessie aan.
+
+    Nodig voor velden die pas later aan ``SESSION_FIELDS`` zijn toegevoegd
+    (zoals de loopdynamiek): oude sessies missen die in hun ``summary_json``,
+    en de ruwe FIT-bestanden worden niet bewaard. Bij een herupload van
+    dezelfde Garmin-zip vult deze functie alléén de ontbrekende sleutels aan —
+    bestaande waarden (en alle andere kolommen) blijven onaangeroerd, zodat
+    een herimport nooit iets kan overschrijven. Geeft True als er iets is
+    aangevuld. Werkt ook op soft-verwijderde sessies (onschadelijk: alleen
+    summary_json).
+    """
+    row = conn.execute(
+        "SELECT summary_json FROM activities WHERE activity_key = ?",
+        (act.activity_key,),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        bestaand = json.loads(row[0] or "{}")
+    except (TypeError, ValueError):
+        bestaand = {}
+    # Dezelfde normalisatie als bij save_activity (datetimes -> strings),
+    # zodat de aangevulde velden er hetzelfde uitzien als bij een verse import.
+    vers = json.loads(json.dumps(act.summary, default=str))
+    nieuw = {k: v for k, v in vers.items() if k not in bestaand}
+    if not nieuw:
+        return False
+    bestaand.update(nieuw)
+    conn.execute(
+        "UPDATE activities SET summary_json = ? WHERE activity_key = ?",
+        (json.dumps(bestaand), act.activity_key),
+    )
+    conn.commit()
+    return True
+
+
+def set_training_label(conn: sqlite3.Connection, activity_key: str,
+                       training_label: str | None) -> bool:
+    """Zet of wis het sessielabel van een bestaande sessie (bijv. achteraf
+    alsnog als "techniek/cadans" markeren). Geeft True als er een rij is geraakt."""
+    cur = conn.execute(
+        "UPDATE activities SET training_label = ? WHERE activity_key = ?",
+        (((training_label or "").strip() or None), activity_key),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def load_activities(conn: sqlite3.Connection) -> pd.DataFrame:
