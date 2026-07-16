@@ -31,11 +31,17 @@ RECORD_FIELDS = {
     "speed": "speed_ms",  # fallback als enhanced_speed ontbreekt
     "distance": "distance_m",
     "cadence": "cadence",
+    "power": "power",
     "enhanced_altitude": "altitude_m",
     "altitude": "altitude_m",
     "position_lat": "lat",
     "position_long": "lon",
 }
+
+# Velden uit device_info-berichten: hieruit leiden we de vermogensbron af
+# (Rally-pedalen buiten vs Kickr-trainer binnen; zie tricoach.power).
+DEVICE_FIELDS = ["manufacturer", "product_name", "device_type",
+                 "antplus_device_type", "garmin_product"]
 
 # FIT slaat GPS-posities op als "semicircles" (gehele getallen), niet als graden.
 # Omrekenen: graden = semicircles × 180 / 2³¹. Sessies zonder GPS (zwemmen in
@@ -62,11 +68,19 @@ class ParsedActivity:
     records: pd.DataFrame        # seconde-data
     lengths: pd.DataFrame        # baandata (alleen zwemmen, anders leeg)
     source_file: str             # bestandsnaam waar dit uit kwam
+    devices: list[dict] = field(default_factory=list)  # device_info-berichten
+    file_manufacturer: str | None = None  # schrijver van het bestand (file_id)
 
     @property
     def duration_s(self) -> float:
         """Actieve duur in seconden (timer-tijd, dus zonder pauzes)."""
         return self.summary.get("total_timer_time") or 0.0
+
+    @property
+    def is_indoor(self) -> bool:
+        """Indoorsessie (trainer/Zwift)? Zie :func:`tricoach.power.is_indoor`."""
+        from tricoach.power import is_indoor
+        return is_indoor(self.sub_sport, self.file_manufacturer)
 
     @property
     def distance_m(self) -> float:
@@ -90,7 +104,7 @@ SESSION_FIELDS = [
     "avg_step_length", "avg_stance_time", "avg_stance_time_percent",
     "avg_vertical_oscillation", "avg_vertical_ratio",
     "total_ascent", "total_descent",
-    "total_calories", "normalized_power", "avg_power",
+    "total_calories", "normalized_power", "avg_power", "max_power",
     # zwemspecifiek
     "pool_length", "num_lengths", "num_active_lengths",
     "total_strokes", "avg_stroke_distance",
@@ -113,8 +127,10 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
     """
     summary: dict = {}
     time_created = None
+    file_manufacturer = None
     record_rows: list[dict] = []
     length_rows: list[dict] = []
+    device_rows: list[dict] = []
 
     with fitdecode.FitReader(stream) as fit:
         for frame in fit:
@@ -123,6 +139,16 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
 
             if frame.name == "file_id":
                 time_created = _value(frame, "time_created")
+                fabrikant = _value(frame, "manufacturer")
+                if fabrikant is not None:
+                    file_manufacturer = str(fabrikant)
+
+            elif frame.name == "device_info":
+                # Gekoppelde sensoren (vermogensmeter, trainer, HR-band):
+                # nodig om de vermogensbron per sessie te kunnen vastleggen.
+                row = {f: _value(frame, f) for f in DEVICE_FIELDS}
+                if any(v is not None for v in row.values()):
+                    device_rows.append(row)
 
             elif frame.name == "session":
                 for f in SESSION_FIELDS:
@@ -168,6 +194,8 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
         records=records,
         lengths=pd.DataFrame(length_rows),
         source_file=source_name,
+        devices=device_rows,
+        file_manufacturer=file_manufacturer,
     )
 
 

@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from tricoach.formatting import derive_speed_ms
+from tricoach.power import estimate_ftp, power_decoupling_trend, power_trend
 from tricoach.storage import load_lengths, load_records
 
 
@@ -454,6 +455,40 @@ def progress_summary_text(conn: sqlite3.Connection, acts: pd.DataFrame) -> str:
                   for _, r in dec.iterrows()]
         delen.append("HR-decoupling per sessie (richtwaarde: < 5% bij duurtraining):\n"
                      + "\n".join(regels))
+
+    # Fietsvermogen (sinds de Rally/Kickr): EF op NP, Pw:Hr-decoupling en de
+    # FTP-schatting — de zuiverste (windonafhankelijke) langetermijnmaten.
+    # Alleen binnen dezelfde bron (pedalen vs trainer) vergelijken.
+    pw = power_trend(acts)
+    if not pw.empty:
+        regels = []
+        for _, r in pw.iterrows():
+            regel = f"  - {r['start_time']:%d-%m}: NP {r['np_power']:.0f} W" \
+                if not pd.isna(r["np_power"]) else \
+                f"  - {r['start_time']:%d-%m}: gem. {r['avg_power']:.0f} W"
+            if not pd.isna(r["ef_watt"]):
+                regel += f", EF {r['ef_watt']:.2f} W/slag"
+            regel += f" ({r['power_source'] or ('indoor' if r['indoor'] else 'buiten')})"
+            regels.append(regel)
+        delen.append(
+            "Fietsvermogen per sessie (EF = NP per hartslag, windonafhankelijk; "
+            "alleen binnen dezelfde bron vergelijken):\n" + "\n".join(regels))
+
+    pw_dec = power_decoupling_trend(conn, acts)
+    if not pw_dec.empty:
+        regels = [f"  - {r['start_time']:%d-%m}: {r['decoupling_pct']:+.1f}%"
+                  f" ({'indoor' if r['indoor'] else 'buiten'})"
+                  for _, r in pw_dec.iterrows()]
+        delen.append("Aerobic decoupling op vermogen (Pw:Hr, richtwaarde < 5%):\n"
+                     + "\n".join(regels))
+
+    ftp_schatting = estimate_ftp(conn, acts)
+    if ftp_schatting:
+        delen.append(
+            f"FTP-schatting uit de trainingsdata: ~{ftp_schatting['ftp_watt']:.0f} W "
+            f"(95% van het beste 20-min vermogen, {ftp_schatting['best20_watt']:.0f} W "
+            f"op {ftp_schatting['datum']:%d-%m}; een echte FTP-test is nauwkeuriger)."
+        )
 
     prs = personal_records(conn, acts)
     if not prs.empty:

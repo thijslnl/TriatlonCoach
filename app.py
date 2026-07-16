@@ -73,6 +73,15 @@ from tricoach.progress import (
     swim_progression,
 )
 from tricoach.importer import import_zip
+from tricoach.power import (
+    FTP_EST_FACTOR,
+    POWER_ZONE_NAMES,
+    estimate_ftp,
+    power_decoupling_trend,
+    power_trend,
+    power_zone_bounds,
+    time_in_power_zones,
+)
 from tricoach.rundynamics import (
     CADENCE_GUIDE_SPM,
     GCT_TRAINED_MS,
@@ -105,6 +114,7 @@ from tricoach.storage import (
     load_deleted_activities,
     load_lengths,
     load_records,
+    recompute_power_zones,
     recompute_zones,
     set_training_label,
     swim_active_seconds,
@@ -119,6 +129,9 @@ st.set_page_config(page_title="Triatlon Coach", page_icon="🏊", layout="wide")
 config = load_config()
 BOUNDS = zone_bounds(config["athlete"])
 Z2 = (BOUNDS[0], BOUNDS[1] - 1)  # Z2-bereik, bijv. 137-151
+# FTP (W) voor de vermogenszones; None zolang er geen (geteste of geschatte)
+# waarde op de instellingen-tab staat — power wordt dan zonder zones getoond.
+FTP = config["athlete"].get("ftp") or None
 MEMORY_DIR = resolve_path(config, "memory_dir")
 TZ = "Europe/Amsterdam"  # Garmin slaat tijden op in UTC; tonen in lokale tijd
 
@@ -367,6 +380,16 @@ def cache_css(versie: tuple) -> dict | None:
     return css_estimate(conn, acts)
 
 
+@st.cache_data(show_spinner=False)
+def cache_power_decoupling(versie: tuple) -> pd.DataFrame:
+    return power_decoupling_trend(conn, acts)
+
+
+@st.cache_data(show_spinner=False)
+def cache_ftp_estimate(versie: tuple) -> dict | None:
+    return estimate_ftp(conn, acts)
+
+
 def render_upload_feedback():
     """Toon de feedback van de zojuist geüploade sessies prominent bovenaan.
 
@@ -520,6 +543,30 @@ with tab_overzicht:
         lambda r: veilig_cel(sessie_tempo, r["sport"], r["distance_m"],
                              r["duration_s"], zwem_actief.get(r["activity_key"])),
         axis=1)
+    # Vermogen en cadans, alleen zinvol bij fietssessies met powerdata (sinds
+    # de Rally/Kickr); alle andere rijen tonen een streepje.
+    def vermogen_cel(r) -> str:
+        if r["sport"] != "cycling" or pd.isna(r.get("avg_power")):
+            return GEEN_WAARDE
+        tekst = f"{r['avg_power']:.0f} W"
+        if not pd.isna(r.get("np_power")):
+            tekst += f" · NP {r['np_power']:.0f}"
+        if r.get("is_indoor"):
+            tekst += " 🏠"
+        return tekst
+
+    def cadans_cel(r) -> str:
+        if r["sport"] != "cycling":
+            return GEEN_WAARDE
+        cadans = r.get("avg_cadence_excl0")
+        if cadans is None or pd.isna(cadans):
+            cadans = r.get("avg_cadence")
+        if cadans is None or pd.isna(cadans):
+            return GEEN_WAARDE
+        return f"{cadans:.0f} rpm"
+
+    tabel["Vermogen"] = tabel.apply(lambda r: veilig_cel(vermogen_cel, r), axis=1)
+    tabel["Cadans"] = tabel.apply(lambda r: veilig_cel(cadans_cel, r), axis=1)
     tabel["% Z2"] = tabel["pct_in_zone2"].map(
         lambda v: GEEN_WAARDE if pd.isna(v) else f"{v:.0f}%")
     tabel["Zones"] = tabel.apply(
@@ -535,7 +582,8 @@ with tab_overzicht:
         if k in combo_leden else "")
 
     vis = tabel[["start_time", "Sport", "Duur", "Afstand", "avg_hr",
-                 "Tempo / snelheid", "% Z2", "Zones", "Trend", "Combo"]]
+                 "Tempo / snelheid", "Vermogen", "Cadans", "% Z2", "Zones",
+                 "Trend", "Combo"]]
     # Kleuraccent voor de %-Z2-cel, per rij vooraf bepaald (index-gekoppeld).
     css = {idx: z2_kleur(r["pct_in_zone2"], r["z1_s"], r["z2_s"],
                          r["z3_s"], r["z4_s"], r["z5_s"])
@@ -549,6 +597,16 @@ with tab_overzicht:
             "Duur": st.column_config.TimeColumn("Duur", format="H:mm:ss"),
             "Afstand": st.column_config.NumberColumn("Afstand", format="%.2f km"),
             "avg_hr": st.column_config.NumberColumn("Gem. HR"),
+            "Vermogen": st.column_config.TextColumn(
+                "Vermogen",
+                help="Gemiddeld vermogen · NP (normalized power) van "
+                     "fietssessies met vermogensmeter (Rally buiten, Kickr "
+                     "binnen — 🏠 = indoor). NP weegt pieken zwaarder en is "
+                     "voor wisselend buitenrijden de betere intensiteitsmaat."),
+            "Cadans": st.column_config.TextColumn(
+                "Cadans",
+                help="Gemiddelde trapfrequentie (rpm, excl. freewheelen — "
+                     "zoals Garmin). Alleen voor fietssessies."),
             "% Z2": st.column_config.TextColumn(
                 "% Zone 2",
                 help=f"Aandeel van de gemeten hartslagtijd in zone 2 ({Z2[0]}–{Z2[1]}). "
@@ -857,13 +915,47 @@ with tab_voortgang:
         "duurtraining duidt op een goede basis."
     )
     ef = efficiency_factor(acts)
+    # Fietsen met vermogensdata krijgt de zuivere EF (NP per hartslag,
+    # windonafhankelijk); de oude snelheid/HR-maat blijft voor ritten zonder
+    # power, zodat de historie van vóór de vermogensmeter zichtbaar blijft.
+    pw_voortgang = power_trend(acts)
+    power_start_times = set(pw_voortgang["start_time"]) \
+        if not pw_voortgang.empty else set()
     c1, c2 = st.columns(2)
     for col, sport_key, titel in ((c1, "running", "Hardlopen"), (c2, "cycling", "Fietsen")):
         with col:
             ef_sport = ef[ef["sport"] == sport_key]
+            if sport_key == "cycling" and not pw_voortgang.empty:
+                ef_pw = pw_voortgang.dropna(subset=["ef_watt"]).copy()
+                if not ef_pw.empty:
+                    ef_pw["Waar"] = ef_pw["indoor"].map(
+                        {True: "Indoor (trainer)", False: "Buiten"})
+                    fig = px.line(
+                        ef_pw, x="start_time", y="ef_watt", color="Waar",
+                        markers=True,
+                        color_discrete_map={"Buiten": SPORT_COLORS["Fietsen"],
+                                            "Indoor (trainer)": PAL["cats"][5]},
+                        labels={"start_time": "Datum",
+                                "ef_watt": "EF (W per hartslag)", "Waar": ""},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=11),
+                        hovertemplate="%{x|%d-%m-%Y} · EF %{y:.2f} · "
+                                      "%{fullData.name}<extra></extra>")
+                    fig.update_layout(
+                        title="Fietsen — EF op vermogen (NP/HR, windonafhankelijk)")
+                    date_xaxis(fig, ef_pw["start_time"])
+                    pad_single_point(fig, ef_pw["start_time"])
+                    chart(fig)
+                # De oude maat alleen nog voor ritten zonder vermogensdata.
+                ef_sport = ef_sport[~ef_sport["start_time"].isin(power_start_times)]
+                if ef_sport.empty:
+                    continue
             if ef_sport.empty:
                 st.info(f"Nog geen {titel.lower()}-sessies.")
                 continue
+            titel_suffix = " (ritten zonder vermogensdata)" \
+                if sport_key == "cycling" and power_start_times else ""
             fig = px.line(
                 ef_sport, x="start_time", y="ef", markers=True,
                 labels={"start_time": "Datum", "ef": "EF (m/min per hartslag)"},
@@ -871,7 +963,8 @@ with tab_voortgang:
             fig.update_traces(
                 marker=dict(size=11), line=dict(color=SPORT_COLORS[titel]),
                 hovertemplate="%{x|%d-%m-%Y} · EF %{y:.2f}<extra></extra>")
-            fig.update_layout(title=f"{titel} — efficiency factor (hoger = beter)")
+            fig.update_layout(
+                title=f"{titel} — efficiency factor (hoger = beter){titel_suffix}")
             pad_single_point(fig, ef_sport["start_time"])
             chart(fig, show_legend=False)
 
@@ -1027,6 +1120,35 @@ with tab_sessie:
               help="Gemiddelde hartslag van de tweede helft minus de eerste helft. "
                    "Duidelijk oplopend = vermoeidheid of een te hoog begintempo.")
 
+    if sessie["sport"] == "cycling" and pd.notna(sessie.get("avg_power")):
+        # Vermogenskerncijfers (sinds de Rally/Kickr). EF = NP per hartslag:
+        # windonafhankelijk, dus de zuiverste aerobe maat voor het fietsen.
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Gem. vermogen", f"{sessie['avg_power']:.0f} W",
+                  help="Gemiddelde over de hele rit, inclusief freewheelen (0 W).")
+        p2.metric("NP", f"{sessie['np_power']:.0f} W"
+                  if pd.notna(sessie.get("np_power")) else GEEN_WAARDE,
+                  help="Normalized power: 30s-gemiddelde → 4e macht → gemiddelde "
+                       "→ 4e-machtswortel. Weegt pieken zwaarder; voor wisselend "
+                       "buitenrijden de betere intensiteitsmaat.")
+        cadans_detail = sessie.get("avg_cadence_excl0")
+        if pd.isna(cadans_detail):
+            cadans_detail = sessie.get("avg_cadence")
+        p3.metric("Cadans", f"{cadans_detail:.0f} rpm"
+                  if pd.notna(cadans_detail) else GEEN_WAARDE,
+                  help="Gemiddelde trapfrequentie exclusief freewheelen (zoals "
+                       "Garmin); het maximum staat in de grafiek hieronder.")
+        p4.metric("EF", f"{sessie['ef_watt']:.2f} W/slag"
+                  if pd.notna(sessie.get("ef_watt")) else GEEN_WAARDE,
+                  help="Efficiency factor: NP gedeeld door je gemiddelde "
+                       "hartslag. Stijgend over weken bij vergelijkbare ritten "
+                       "= aerobe vooruitgang, onafhankelijk van de wind.")
+        bron = sessie.get("power_source")
+        p5.metric("Bron", ("🏠 " if sessie.get("is_indoor") else "🌍 ")
+                  + (str(bron) if bron and pd.notna(bron) else "onbekend"),
+                  help="Pedalen (buiten) en trainer (binnen) meten net iets "
+                       "anders; vergelijk trends binnen dezelfde bron.")
+
     if sessie["sport"] == "running":
         # Loopdynamiek van deze sessie (zelfde getallen als Garmin Connect;
         # cadans als totale stappen per minuut). Oudere imports missen de
@@ -1138,11 +1260,24 @@ with tab_sessie:
             if "speed_ms" in rec else pd.Series(dtype=float)
         alt = rec["altitude_m"].rolling(10, min_periods=1).mean() \
             if "altitude_m" in rec and rec["altitude_m"].notna().any() else pd.Series(dtype=float)
-        rijen = 2 + (0 if alt.empty else 1)
+        # Vermogen en cadans (fietsen met vermogensmeter): eigen panelen onder
+        # de hartslag, zodat vermogen vs hartslag in één blik (en één unified
+        # hover) te vergelijken is. Nullen zijn echte waarden (freewheelen).
+        power_glad = rec["power"].rolling(10, min_periods=1).mean() \
+            if sessie["sport"] == "cycling" and "power" in rec \
+            and rec["power"].notna().any() else pd.Series(dtype=float)
+        cad_glad = rec["cadence"].rolling(10, min_periods=1).mean() \
+            if sessie["sport"] == "cycling" and "cadence" in rec \
+            and rec["cadence"].notna().any() else pd.Series(dtype=float)
+        rijen = 2 + (0 if power_glad.empty else 1) + (0 if cad_glad.empty else 1) \
+            + (0 if alt.empty else 1)
+        # Hartslag en tempo/snelheid wat ruimer, de rest gelijk verdeeld.
+        gewichten = [0.3, 0.25] + [0.45 / (rijen - 2)] * (rijen - 2) \
+            if rijen > 2 else [0.55, 0.45]
 
         fig = make_subplots(rows=rijen, cols=1, shared_xaxes=True,
-                            row_heights=[0.4, 0.35, 0.25][:rijen],
-                            vertical_spacing=0.06)
+                            row_heights=gewichten,
+                            vertical_spacing=0.05)
         # Zonebanden achter de hartslaglijn: in één blik zie je de zone.
         onder = float(min(hr_glad.min(), BOUNDS[0] - 10))
         boven = float(max(hr_glad.max() + 5, BOUNDS[3] + 5))
@@ -1174,17 +1309,85 @@ with tab_sessie:
                 row=2, col=1)
             fig.update_yaxes(title_text="km/h", row=2, col=1)
 
+        rij = 3
+        if not power_glad.empty:
+            fig.add_trace(go.Scatter(
+                x=rec["minuut"], y=power_glad, name="Vermogen",
+                line=dict(color=PAL["cats"][3], width=2),
+                hovertemplate="min %{x:.0f}: %{y:.0f} W<extra></extra>"),
+                row=rij, col=1)
+            if FTP:
+                # Bovengrens zone 2 als referentie: daaronder is echt rustig.
+                fig.add_hline(y=power_zone_bounds(FTP)[1], line_dash="dash",
+                              line_color=PAL["ref_line"],
+                              annotation_text="bovengrens P2 (rustig)",
+                              annotation_font_color=PAL["muted"],
+                              row=rij, col=1)
+            fig.update_yaxes(title_text="Vermogen (W)", rangemode="tozero",
+                             row=rij, col=1)
+            rij += 1
+        if not cad_glad.empty:
+            fig.add_trace(go.Scatter(
+                x=rec["minuut"], y=cad_glad, name="Cadans",
+                line=dict(color=PAL["cats"][7], width=2),
+                hovertemplate="min %{x:.0f}: %{y:.0f} rpm<extra></extra>"),
+                row=rij, col=1)
+            fig.update_yaxes(title_text="Cadans (rpm)", rangemode="tozero",
+                             row=rij, col=1)
+            rij += 1
         if not alt.empty:
             fig.add_trace(go.Scatter(
                 x=rec["minuut"], y=alt, name="Hoogte",
                 line=dict(color=PAL["muted"], width=2),
                 hovertemplate="min %{x:.0f}: %{y:.0f} m<extra></extra>"),
-                row=3, col=1)
-            fig.update_yaxes(title_text="Hoogte (m)", row=3, col=1)
+                row=rij, col=1)
+            fig.update_yaxes(title_text="Hoogte (m)", row=rij, col=1)
 
         fig.update_xaxes(title_text="Minuten", row=rijen, col=1)
-        fig.update_layout(height=170 * rijen + 120, hovermode="x unified")
+        fig.update_layout(height=150 * rijen + 120, hovermode="x unified")
         chart(fig)
+
+        # Tijd in vermogenszones: vers berekend uit de seconde-data met de
+        # actuele FTP, naast de HR-zonebanden hierboven. Zonder FTP geen
+        # zone-oordeel — alleen een hint dat de instelling bestaat.
+        if sessie["sport"] == "cycling" and not power_glad.empty:
+            if FTP:
+                tip = time_in_power_zones(rec, FTP)
+                if sum(tip.values()) > 0:
+                    st.subheader("Tijd in vermogenszones")
+                    grenzen_w = [round(w) for w in power_zone_bounds(FTP)]
+                    zone_labels = {
+                        "P1": f"P1 herstel (<{grenzen_w[0]} W)",
+                        "P2": f"P2 duur ({grenzen_w[0]}–{grenzen_w[1]} W)",
+                        "P3": f"P3 tempo ({grenzen_w[1]}–{grenzen_w[2]} W)",
+                        "P4": f"P4 drempel ({grenzen_w[2]}–{grenzen_w[3]} W)",
+                        "P5": f"P5 VO2max ({grenzen_w[3]}–{grenzen_w[4]} W)",
+                        "P6": f"P6 anaeroob (>{grenzen_w[4]} W)",
+                    }
+                    tip_df = pd.DataFrame({
+                        "Zone": [zone_labels[z] for z in POWER_ZONE_NAMES],
+                        "Minuten": [tip[z] / 60 for z in POWER_ZONE_NAMES],
+                    })
+                    fig = px.bar(
+                        tip_df, x="Minuten", y="Zone", orientation="h",
+                        labels={"Minuten": "Minuten", "Zone": ""},
+                    )
+                    fig.update_traces(
+                        marker_color=[PAL["zones"][min(i, 4)] for i in range(6)],
+                        marker_line=dict(width=1, color=PAL["surface"]),
+                        hovertemplate="%{y}: %{x:.0f} min<extra></extra>")
+                    fig.update_yaxes(autorange="reversed")
+                    fig.update_layout(
+                        title=f"Vermogenszones (Coggan, FTP {FTP:.0f} W) — naast "
+                              "de hartslagzones, niet in de plaats ervan",
+                        height=280)
+                    chart(fig, show_legend=False)
+            else:
+                st.caption(
+                    "💡 Deze rit heeft vermogensdata, maar er is nog geen FTP "
+                    "ingesteld — zet hem op de ⚙️ Instellingen-tab en hier "
+                    "verschijnt de tijd per vermogenszone."
+                )
 
         if sessie["sport"] == "running":
             splits = run_splits_df(rec)
@@ -1439,6 +1642,156 @@ with tab_fietsen:
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} m<extra></extra>")
             fig.update_layout(title="Hoogtemeters per rit")
             chart(fig, show_legend=False)
+
+        st.divider()
+        st.subheader("⚡ Vermogen")
+        pw = power_trend(rides)
+        if pw.empty:
+            st.info(
+                "Nog geen ritten met vermogensdata. Sinds de Rally-pedalen "
+                "(buiten) en de Kickr-trainer (binnen) komt die vanzelf mee "
+                "met nieuwe FIT-bestanden; eerder geïmporteerde ritten van "
+                "ná de aanschaf krijgen hem alsnog door de Garmin-zip "
+                "opnieuw te uploaden."
+            )
+        else:
+            # FTP-status: ingesteld → tonen; onbekend → schatting aanbieden.
+            if FTP:
+                grenzen_w = [round(w) for w in power_zone_bounds(FTP)]
+                st.caption(
+                    f"FTP: **{FTP:.0f} W** (instellingen-tab) → zones (Coggan): "
+                    f"P1 <{grenzen_w[0]} · P2 {grenzen_w[0]}–{grenzen_w[1]} · "
+                    f"P3 {grenzen_w[1]}–{grenzen_w[2]} · P4 {grenzen_w[2]}–{grenzen_w[3]} · "
+                    f"P5 {grenzen_w[3]}–{grenzen_w[4]} · P6 >{grenzen_w[4]} W."
+                )
+            else:
+                schatting = cache_ftp_estimate(DATA_VERSIE)
+                if schatting:
+                    st.info(
+                        f"💡 **FTP-schatting uit je data: ~{schatting['ftp_watt']:.0f} W** "
+                        f"({FTP_EST_FACTOR:.0%} van je beste 20-minutenvermogen, "
+                        f"{schatting['best20_watt']:.0f} W op "
+                        f"{schatting['datum']:%d-%m-%Y}). Zet hem op de ⚙️ "
+                        "Instellingen-tab om vermogenszones te krijgen — een "
+                        "echte FTP-test blijft nauwkeuriger dan deze schatting "
+                        "uit gewone trainingen."
+                    )
+                else:
+                    st.caption(
+                        "Nog geen FTP ingesteld en nog geen rit met een vol "
+                        "20-minutenblok voor een schatting. Tot die tijd wordt "
+                        "het vermogen zonder zone-oordeel getoond."
+                    )
+
+            # Bron als kleur: pedalen (buiten) en trainer (binnen) meten net
+            # iets anders, dus trends horen per bron gelezen te worden.
+            pw = pw.copy()
+            pw["Bron"] = pw["power_source"].fillna("onbekend")
+            bron_kleuren = dict(zip(sorted(pw["Bron"].unique()), PAL["cats"]))
+
+            e1, e2 = st.columns(2)
+            with e1:
+                ef_pw = pw.dropna(subset=["ef_watt"])
+                if ef_pw.empty:
+                    st.info("Nog geen ritten met vermogen én hartslag.")
+                else:
+                    fig = px.line(
+                        ef_pw, x="start_time", y="ef_watt", color="Bron",
+                        markers=True, color_discrete_map=bron_kleuren,
+                        labels={"start_time": "Datum",
+                                "ef_watt": "EF (W per hartslag)", "Bron": ""},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=11),
+                        hovertemplate="%{x|%d-%m-%Y} · EF %{y:.2f} · "
+                                      "%{fullData.name}<extra></extra>")
+                    fig.update_layout(
+                        title="Efficiency factor — NP per hartslag (hoger = beter)")
+                    date_xaxis(fig, ef_pw["start_time"])
+                    pad_single_point(fig, ef_pw["start_time"])
+                    chart(fig)
+                    st.caption(
+                        "Dé aerobe fietstrend, eindelijk windonafhankelijk: "
+                        "meer watt bij dezelfde hartslag = grotere motor. "
+                        "Vergelijk binnen één kleur (bron) — pedalen en "
+                        "trainer meten net iets anders."
+                    )
+            with e2:
+                np_pw = pw.copy()
+                np_pw["watt"] = np_pw["np_power"].where(
+                    np_pw["np_power"].notna(), np_pw["avg_power"])
+                fig = px.line(
+                    np_pw, x="start_time", y="watt", color="Bron",
+                    markers=True, color_discrete_map=bron_kleuren,
+                    custom_data=["avg_power"],
+                    labels={"start_time": "Datum", "watt": "NP (W)", "Bron": ""},
+                )
+                fig.update_traces(
+                    marker=dict(size=11),
+                    hovertemplate="%{x|%d-%m-%Y} · NP %{y:.0f} W (gem. "
+                                  "%{customdata[0]:.0f} W) · %{fullData.name}"
+                                  "<extra></extra>")
+                fig.update_layout(title="Normalized power per rit")
+                date_xaxis(fig, np_pw["start_time"])
+                pad_single_point(fig, np_pw["start_time"])
+                chart(fig)
+
+            f1, f2 = st.columns(2)
+            with f1:
+                cad_pw = pw.dropna(subset=["cadans"])
+                if not cad_pw.empty:
+                    fig = px.line(
+                        cad_pw, x="start_time", y="cadans", color="Bron",
+                        markers=True, color_discrete_map=bron_kleuren,
+                        labels={"start_time": "Datum",
+                                "cadans": "Cadans (rpm)", "Bron": ""},
+                    )
+                    fig.update_traces(
+                        marker=dict(size=11),
+                        hovertemplate="%{x|%d-%m-%Y} · %{y:.0f} rpm · "
+                                      "%{fullData.name}<extra></extra>")
+                    fig.update_layout(
+                        title="Cadans per rit (excl. freewheelen, als Garmin)")
+                    date_xaxis(fig, cad_pw["start_time"])
+                    pad_single_point(fig, cad_pw["start_time"])
+                    chart(fig)
+                    st.caption(
+                        "Observatie, geen doel: je eigen patroon is de maat. "
+                        "Iets hogere cadans spaart de benen richting het "
+                        "lopen erna — relevant voor triatlon, niets om te "
+                        "forceren."
+                    )
+            with f2:
+                pw_dec = cache_power_decoupling(DATA_VERSIE)
+                if not pw_dec.empty:
+                    pw_dec = pw_dec.copy()
+                    pw_dec["Waar"] = pw_dec["indoor"].map(
+                        {True: "Indoor (trainer)", False: "Buiten"})
+                    fig = px.bar(
+                        pw_dec, x="start_time", y="decoupling_pct", color="Waar",
+                        barmode="group",
+                        color_discrete_map={"Buiten": SPORT_COLORS["Fietsen"],
+                                            "Indoor (trainer)": PAL["cats"][5]},
+                        labels={"start_time": "Datum",
+                                "decoupling_pct": "Pw:Hr decoupling (%)",
+                                "Waar": ""},
+                    )
+                    fig.add_hline(y=5, line_dash="dash", line_color=PAL["ref_line"],
+                                  annotation_text="richtwaarde 5%",
+                                  annotation_font_color=PAL["muted"])
+                    fig.update_traces(
+                        marker_line=dict(width=1, color=PAL["surface"]),
+                        hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}%<extra></extra>")
+                    fig.update_layout(
+                        title="Aerobic decoupling (Pw:Hr) — lager = betere basis")
+                    date_xaxis(fig, pw_dec["start_time"])
+                    chart(fig)
+                    st.caption(
+                        "Vermogen/hartslag van de eerste vs de tweede helft "
+                        "van ritten ≥30 min. Onder de 5% bij een duurrit "
+                        "duidt op een goed ontwikkelde aerobe basis — de "
+                        "opvolger van de HR-drift-analyse."
+                    )
 
 with tab_zwemmen:
     swim = swim_per_session(conn, acts)
@@ -2101,6 +2454,41 @@ with tab_settings:
         "memory/lthr_geschiedenis.md."
     )
 
+    st.subheader("⚡ FTP (fietsvermogen)")
+    new_ftp = st.number_input(
+        "FTP in watt (0 = nog onbekend)", 0, 500,
+        int(config["athlete"].get("ftp") or 0),
+        help="Functional Threshold Power: het vermogen dat je ~een uur kunt "
+             "volhouden. De hartslagzones blijven gewoon bestaan; power komt "
+             "ernaast. Bij een wijziging worden de vermogenszone-tijden van "
+             "alle ritten met powerdata herrekend en komt de wijziging in de "
+             "changelog van doelen.md.",
+    )
+    if new_ftp:
+        p_preview = [round(w) for w in power_zone_bounds(new_ftp)]
+        st.caption(
+            f"Vermogenszones bij FTP {new_ftp} W (Coggan): "
+            f"P1 < {p_preview[0]} · P2 {p_preview[0]}–{p_preview[1]} · "
+            f"P3 {p_preview[1]}–{p_preview[2]} · P4 {p_preview[2]}–{p_preview[3]} · "
+            f"P5 {p_preview[3]}–{p_preview[4]} · P6 > {p_preview[4]} W."
+        )
+    else:
+        ftp_hint = cache_ftp_estimate(DATA_VERSIE)
+        if ftp_hint:
+            st.caption(
+                f"💡 Schatting uit je data: **~{ftp_hint['ftp_watt']:.0f} W** "
+                f"({FTP_EST_FACTOR:.0%} van je beste 20-minutenvermogen, "
+                f"{ftp_hint['best20_watt']:.0f} W op {ftp_hint['datum']:%d-%m-%Y}). "
+                "Een echte FTP-test (bijv. 20 min voluit op de Kickr) is "
+                "nauwkeuriger; tot je een waarde invult wordt vermogen zonder "
+                "zone-oordeel getoond."
+            )
+        else:
+            st.caption(
+                "Nog geen FTP en nog geen rit met een vol 20-minutenblok voor "
+                "een schatting — vermogen wordt zonder zone-oordeel getoond."
+            )
+
     st.subheader("🤖 LLM")
     c1, c2, c3 = st.columns(3)
     new_host = c1.text_input("Ollama host", config["llm"]["ollama"]["host"])
@@ -2134,6 +2522,7 @@ with tab_settings:
         ]
         new_config["athlete"]["max_hr"] = new_max_hr
         new_config["athlete"]["lthr"] = new_lthr
+        new_config["athlete"]["ftp"] = int(new_ftp) or None
         new_config["athlete"]["training_days"] = new_training_days.strip()
         new_config["athlete"]["session_time"] = new_session_time.strip()
         new_config["athlete"].pop("zone_bounds", None)  # zones komen nu uit %LTHR
@@ -2147,13 +2536,26 @@ with tab_settings:
         wijzigingen = profile_mod.update_doelen(
             MEMORY_DIR, config, new_config, note="instellingen-tab")
 
+        meldingen = []
         if new_lthr != int(config["athlete"]["lthr"]):
             lthr_append(MEMORY_DIR, new_lthr, "Aangepast via instellingen-tab")
             n = recompute_zones(conn, preview)
-            st.session_state["settings_flash"] = (
-                f"Opgeslagen. Nieuwe LTHR {new_lthr} vastgelegd in de geschiedenis; "
-                f"zonetijden van {n} trainingen herrekend."
+            meldingen.append(
+                f"nieuwe LTHR {new_lthr} vastgelegd in de geschiedenis; "
+                f"zonetijden van {n} trainingen herrekend"
             )
+        # FTP gezet, gewijzigd of gewist: de vermogenszone-tijden van alle
+        # ritten met powerdata herrekenen (wissen = netjes terugvallen op
+        # "geen zone-oordeel"); de changelog in doelen.md legt de wijziging vast.
+        if (int(new_ftp) or None) != (config["athlete"].get("ftp") or None):
+            n_pw = recompute_power_zones(conn, int(new_ftp) or None)
+            meldingen.append(
+                f"FTP {'gewist' if not new_ftp else f'op {new_ftp} W gezet'}; "
+                f"vermogenszones van {n_pw} ritten herrekend"
+            )
+        if meldingen:
+            st.session_state["settings_flash"] = "Opgeslagen. " + \
+                "; ".join(m[0].upper() + m[1:] for m in meldingen) + "."
         else:
             aantal = len(wijzigingen)
             st.session_state["settings_flash"] = (

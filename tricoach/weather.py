@@ -223,6 +223,11 @@ def wind_for_activity(act: ParsedActivity, memory_dir: Path | None = None) -> Wi
     """
     if act.sport not in WIND_RELEVANT_SPORTS:
         return None
+    # Indoorsessies (trainer/Zwift) overslaan: er staat binnen geen wind, en
+    # Zwift-bestanden bevatten wél GPS — virtuele coördinaten, dus zonder deze
+    # check zou er weer voor een virtueel eiland worden opgehaald.
+    if act.is_indoor:
+        return None
     coord = start_coordinate(act)
     if coord is None:
         return None

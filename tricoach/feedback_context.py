@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from tricoach import power as pwr
 from tricoach.analysis import pace_at_hr
 from tricoach.combos import combo_block
 from tricoach.fit_parser import ParsedActivity
@@ -176,6 +177,83 @@ def _bike_detail(records: pd.DataFrame, summary: dict) -> str | None:
     return "\n".join(regels) if regels else None
 
 
+def _bike_power_detail(act: ParsedActivity, ftp: float | None) -> str | None:
+    """Vermogens- en cadansanalyse van een fietsrit, voor de LLM-context.
+
+    Alles komt uit de seconde-data van de zojuist geparste sessie: NP, EF,
+    Pw:Hr-decoupling, de pacing-check (eerste kwartier vs rest — dé test op
+    te hard starten) en de cadans incl./excl. nul. Tijd-in-vermogenszones
+    alleen als de FTP bekend is. None voor ritten zonder powerdata (oudere
+    sessies), dan valt de feedback vanzelf terug op hartslag en snelheid.
+    """
+    records = act.records
+    if records.empty or "power" not in records or not records["power"].notna().any():
+        return None
+    s = act.summary
+    indoor = act.is_indoor
+    bron = pwr.power_source(act.devices, indoor)
+    np_watt = pwr.normalized_power(records) or s.get("normalized_power")
+    avg_watt = s.get("avg_power") or float(records["power"].dropna().mean())
+
+    regel_watt = f"- Vermogen: gem. {avg_watt:.0f} W"
+    if np_watt:
+        regel_watt += f", NP {np_watt:.0f} W"
+    if s.get("max_power"):
+        regel_watt += f", max {s['max_power']:.0f} W"
+    regel_watt += f" — bron: {bron} ({'indoor' if indoor else 'buiten'})"
+    regels = [regel_watt]
+
+    ef = pwr.efficiency_factor(np_watt, s.get("avg_heart_rate"))
+    if ef:
+        regels.append(
+            f"- Efficiency factor (NP/gem. HR): {ef:.2f} W per hartslag — "
+            "windonafhankelijke aerobe maat; vergelijk alleen binnen dezelfde bron"
+        )
+
+    dec = pwr.power_decoupling(records)
+    if dec is not None:
+        regels.append(
+            f"- Aerobic decoupling (Pw:Hr): {dec:+.1f}% "
+            "(EF eerste vs tweede helft; onder ~5% = goed ontwikkelde aerobe basis)"
+        )
+
+    pacing = pwr.pacing_split(records)
+    if pacing:
+        eerste, rest = pacing
+        delta = (eerste - rest) / rest * 100 if rest else 0.0
+        regels.append(
+            f"- Pacing: eerste {pwr.PACING_FIRST_MIN} min gem. {eerste:.0f} W, "
+            f"rest van de rit {rest:.0f} W ({delta:+.0f}%) — bekende valkuil van "
+            "de atleet is te hard starten; benoem het als de start duidelijk "
+            "feller was dan de rest"
+        )
+
+    cad = pwr.cadence_stats(records)
+    if cad["excl0"] is not None:
+        regel = f"- Cadans: gem. {cad['excl0']:.0f} rpm (excl. nul"
+        if cad["incl0"] is not None:
+            regel += f"; incl. freewheelen {cad['incl0']:.0f}"
+        regel += ")"
+        if cad["max"] is not None:
+            regel += f", max {cad['max']:.0f} rpm"
+        regels.append(regel)
+
+    if ftp:
+        tip = pwr.time_in_power_zones(records, ftp)
+        totaal = sum(tip.values()) or 1
+        verdeling = " · ".join(
+            f"{z} {fmt_duration(v)} ({v / totaal * 100:.0f}%)"
+            for z, v in tip.items() if v > 0
+        )
+        regels.append(f"- Tijd in vermogenszones (FTP {ftp:.0f} W, Coggan): {verdeling}")
+    else:
+        regels.append(
+            "- Vermogenszones: nog niet beschikbaar (FTP onbekend — geen "
+            "zone-oordeel over het vermogen geven)"
+        )
+    return "\n".join(regels)
+
+
 def _swim_detail(lengths: pd.DataFrame, pool_length: float | None,
                  distance_m: float | None) -> str | None:
     """Baan-voor-baan-analyse van een zwemsessie: tempo, slagritme, consistentie.
@@ -233,13 +311,15 @@ def session_block(
     user_note: str | None,
     wind: "object | None",
     training_label: str | None = None,
+    ftp: float | None = None,
 ) -> str:
     """Het volledige beeld van de zojuist voltooide sessie.
 
     ``training_label`` is het sessielabel van de atleet; bij een
     techniek-/cadanssessie gaat de uitleg mee dat een hogere hartslag daar
     verwacht en oké is, zodat de coach de sessie niet als "te hard getraind"
-    beoordeelt.
+    beoordeelt. ``ftp`` (optioneel) maakt de tijd-in-vermogenszones in het
+    fietsdetail mogelijk.
     """
     s = act.summary
     total = sum(tiz.values()) or 1
@@ -279,10 +359,27 @@ def session_block(
     if detail:
         regels.append(f"- {kop}:\n{detail}")
 
-    regels.append(
-        f"- Omstandigheden (Open-Meteo): "
-        f"{wind.as_text() if wind is not None else '(geen weerdata — binnen of geen GPS)'}"
-    )
+    if act.sport == "cycling":
+        power_detail = _bike_power_detail(act, ftp)
+        if power_detail:
+            regels.append(
+                "- Vermogen & cadans (primaire intensiteitsmaat voor deze rit):\n"
+                + power_detail
+            )
+
+    if act.sport == "cycling" and act.is_indoor:
+        regels.append(
+            "- Omstandigheden: indoorsessie (trainer/Zwift) — wind, verkeer en "
+            "hoogteprofiel zijn niet van toepassing; beoordeel puur op "
+            "vermogen, duur en zones. Een blokkerig vermogensprofiel duidt op "
+            "een gestructureerde (interval)training: toets die aan de "
+            "bedoeling, niet aan rustig-blijven."
+        )
+    else:
+        regels.append(
+            f"- Omstandigheden (Open-Meteo): "
+            f"{wind.as_text() if wind is not None else '(geen weerdata — binnen of geen GPS)'}"
+        )
     if observation:
         regels.append(f"- Beschrijvende observatie (lokaal model): {observation}")
     regels.append(f"- Opmerking van de atleet bij de upload: {user_note or '(geen)'}")
@@ -324,6 +421,17 @@ def _row_line(row: pd.Series, sport: str) -> str:
         delen.append(f"{row['distance_m'] / 1000:.1f} km, {fmt_speed_kmh(speed)}")
         if row.get("total_ascent") and not pd.isna(row["total_ascent"]):
             delen.append(f"{row['total_ascent']:.0f} hm")
+        # Vermogen als de sessie het heeft (sinds juli 2026): NP + EF + bron,
+        # zodat de coach binnen dezelfde bron kan vergelijken.
+        np_watt = row.get("np_power")
+        if np_watt is not None and not pd.isna(np_watt):
+            delen.append(f"NP {np_watt:.0f} W")
+            ef = row.get("ef_watt")
+            if ef is not None and not pd.isna(ef):
+                delen.append(f"EF {ef:.2f}")
+            bron = row.get("power_source")
+            if bron and not (isinstance(bron, float) and pd.isna(bron)):
+                delen.append(str(bron))
     if not pd.isna(row.get("avg_hr")):
         delen.append(f"HR gem {row['avg_hr']:.0f}")
     if not pd.isna(row.get("pct_in_zone2")):
@@ -431,6 +539,41 @@ def pace_history_block(conn: sqlite3.Connection, act: ParsedActivity,
         f"bij HR {z2[0]}-{z2[1]}"
         for _, r in trend.iterrows()
     )
+
+
+def power_history_block(conn: sqlite3.Connection, act: ParsedActivity) -> str | None:
+    """EF-historie (NP per hartslag) van eerdere fietssessies, per bron.
+
+    De opvolger van tempo-bij-gelijke-hartslag voor het fietsen: vermogen is
+    windonafhankelijk, dus een stijgende EF (of dezelfde power bij een lagere
+    HR) is zuivere aerobe vooruitgang. Per vermogensbron gegroepeerd —
+    pedalen en trainer meten net iets anders. None voor andere sporten of
+    zolang er geen eerdere powersessies zijn.
+    """
+    if act.sport != "cycling":
+        return None
+    prev = _prev_activities(conn, act)
+    if prev.empty or "ef_watt" not in prev:
+        return None
+    prev = prev[(prev["sport"] == "cycling") & prev["ef_watt"].notna()]
+    if prev.empty:
+        return None
+
+    regels = []
+    for bron, groep in prev.groupby(prev["power_source"].fillna("onbekende bron")):
+        laatste = groep.sort_values("start_time").tail(6)
+        regels.append(f"Bron: {bron}")
+        regels.extend(
+            f"- {_local(r['start_time']):%d-%m-%Y}: EF {r['ef_watt']:.2f} "
+            f"(NP {r['np_power']:.0f} W bij HR gem {r['avg_hr']:.0f})"
+            for _, r in laatste.iterrows()
+        )
+    regels.append(
+        "Leesinstructie: stijgende EF (of gelijke power bij lagere HR) over "
+        "weken = aerobe vooruitgang. Vergelijk alleen binnen dezelfde bron; "
+        "benoem het expliciet als een vergelijking bronnen mengt."
+    )
+    return "\n".join(regels)
 
 
 # ------------------------------------------------- belasting & recente context --
@@ -558,9 +701,12 @@ def build_feedback_context(
     bounds = zone_bounds(config["athlete"])
     z2 = (bounds[0], bounds[1] - 1)
 
+    ftp = config["athlete"].get("ftp") or None
+
     blocks = [
         "# Zojuist voltooide sessie\n\n"
-        + session_block(act, tiz, observation, user_note, wind, training_label),
+        + session_block(act, tiz, observation, user_note, wind, training_label,
+                        ftp=ftp),
     ]
     # Loopdynamiek gaat als apart, expliciet als langetermijn gemarkeerd blok
     # mee: cadans/grondcontacttijd zijn een project voor ná de eerste race en
@@ -590,6 +736,14 @@ def build_feedback_context(
         blocks.append(
             "# Tempo bij gelijke hartslag (zone 2) — belangrijkste voortgangsmaat\n\n"
             + tempo
+        )
+    # Voor fietsen komt de EF-historie op vermogen erbij: windonafhankelijk en
+    # daarmee de zuiverste voortgangsmaat zodra er powerdata is.
+    power_hist = power_history_block(conn, act)
+    if power_hist:
+        blocks.append(
+            "# Efficiency factor op vermogen (fietsen) — zuiverste voortgangsmaat\n\n"
+            + power_hist
         )
     blocks.append(
         f"# Recente belasting (laatste {LOAD_DAYS} dagen)\n\n"

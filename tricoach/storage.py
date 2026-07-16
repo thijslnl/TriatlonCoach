@@ -26,6 +26,14 @@ from pathlib import Path
 import pandas as pd
 
 from tricoach.fit_parser import ParsedActivity
+from tricoach.power import (
+    POWER_ZONE_NAMES,
+    cadence_stats,
+    efficiency_factor,
+    normalized_power,
+    power_source,
+    time_in_power_zones,
+)
 from tricoach.zones import ZONE_NAMES, pct_in_zone2, time_in_zones
 
 SCHEMA = """
@@ -48,6 +56,15 @@ CREATE TABLE IF NOT EXISTS activities (
     z1_s INTEGER, z2_s INTEGER, z3_s INTEGER, z4_s INTEGER, z5_s INTEGER,
     pct_in_zone2       REAL,
     aerobic_efficiency REAL,
+    avg_power          REAL,
+    np_power           REAL,
+    avg_cadence_excl0  REAL,
+    max_cadence        REAL,
+    is_indoor          INTEGER,
+    power_source       TEXT,
+    ef_watt            REAL,
+    p1_s INTEGER, p2_s INTEGER, p3_s INTEGER,
+    p4_s INTEGER, p5_s INTEGER, p6_s INTEGER,
     user_note      TEXT,
     training_label TEXT,
     wind_speed     REAL,
@@ -66,6 +83,7 @@ CREATE TABLE IF NOT EXISTS records (
     speed_ms     REAL,
     distance_m   REAL,
     cadence      REAL,
+    power        REAL,
     altitude_m   REAL
 );
 CREATE INDEX IF NOT EXISTS idx_records_key ON records(activity_key);
@@ -113,6 +131,22 @@ _ADDED_COLUMNS = {
     # maar de rij blijft staan zodat de dedup op activity_key intact blijft
     # en herstellen mogelijk is.
     "deleted_at": "TEXT",
+    # Fietsvermogen en -cadans (sinds de Rally-pedalen/Kickr-trainer, juli
+    # 2026): gemiddeld en genormaliseerd vermogen, cadans exclusief nul
+    # (Garmin-conventie) en het maximum, indoor-markering (Zwift/trainer),
+    # de vermogensbron (pedalen vs trainer — trends per bron vergelijken) en
+    # de efficiency factor (NP per hartslag). Oude sessies blijven NULL.
+    "avg_power": "REAL",
+    "np_power": "REAL",
+    "avg_cadence_excl0": "REAL",
+    "max_cadence": "REAL",
+    "is_indoor": "INTEGER",
+    "power_source": "TEXT",
+    "ef_watt": "REAL",
+    # Tijd per vermogenszone (Coggan, % van FTP); NULL zolang de FTP onbekend
+    # is en herrekend via recompute_power_zones zodra hij wijzigt.
+    "p1_s": "INTEGER", "p2_s": "INTEGER", "p3_s": "INTEGER",
+    "p4_s": "INTEGER", "p5_s": "INTEGER", "p6_s": "INTEGER",
 }
 
 
@@ -126,6 +160,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if have_lengths and "start_time" not in have_lengths:
         # Per-baan-starttijd (sinds de CSS-schatting); oude rijen blijven NULL.
         conn.execute("ALTER TABLE lengths ADD COLUMN start_time TEXT")
+    have_records = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
+    if have_records and "power" not in have_records:
+        # Vermogen per meetpunt (sinds de vermogensmeters); oude rijen NULL.
+        conn.execute("ALTER TABLE records ADD COLUMN power REAL")
     conn.commit()
 
 
@@ -142,6 +180,50 @@ def aerobic_efficiency(sport: str, avg_speed_ms: float | None,
     if not avg_speed_ms or not avg_hr:
         return None
     return avg_speed_ms / avg_hr
+
+
+def _power_fields(act: ParsedActivity, ftp: float | None) -> dict:
+    """De power-/cadanskolommen voor één fietssessie, uit de seconde-data.
+
+    Voor andere sporten (en fietssessies zonder powerdata) blijft alles None —
+    het loopvermogen dat het horloge schat blijft bewust in ``summary_json``
+    (zie :func:`tricoach.analysis.run_power`), zodat de fietskolommen zuiver
+    één bron per sport bevatten. De tijd-in-vermogenszones (p1..p6) blijft
+    None zolang de FTP onbekend is.
+    """
+    velden = dict.fromkeys(
+        ["avg_power", "np_power", "avg_cadence_excl0", "max_cadence",
+         "is_indoor", "power_source", "ef_watt"], None)
+    velden.update(dict.fromkeys([f"p{i}_s" for i in range(1, 7)], None))
+    if act.sport != "cycling":
+        return velden
+
+    indoor = act.is_indoor
+    velden["is_indoor"] = int(indoor)
+
+    heeft_power = (not act.records.empty and "power" in act.records
+                   and act.records["power"].notna().any())
+    if not heeft_power:
+        return velden
+
+    s = act.summary
+    np_watt = normalized_power(act.records) or s.get("normalized_power")
+    cad = cadence_stats(act.records)
+    velden.update({
+        "avg_power": s.get("avg_power"),
+        "np_power": np_watt,
+        "avg_cadence_excl0": cad["excl0"],
+        "max_cadence": cad["max"] if cad["max"] is not None else s.get("max_cadence"),
+        "power_source": power_source(act.devices, indoor),
+        "ef_watt": efficiency_factor(np_watt, s.get("avg_heart_rate")),
+    })
+    if velden["avg_power"] is None and not act.records.empty:
+        velden["avg_power"] = float(act.records["power"].dropna().mean())
+    if ftp:
+        tip = time_in_power_zones(act.records, ftp)
+        velden.update({f"p{i}_s": tip[naam]
+                       for i, naam in enumerate(POWER_ZONE_NAMES, start=1)})
+    return velden
 
 
 def activity_exists(conn: sqlite3.Connection, activity_key: str) -> bool:
@@ -172,6 +254,7 @@ def save_activity(
     user_note: str | None = None,
     wind: "WindData | None" = None,
     training_label: str | None = None,
+    ftp: float | None = None,
 ) -> bool:
     """Sla één activiteit op. Geeft False terug als hij al bestond (dedup).
 
@@ -179,7 +262,9 @@ def save_activity(
     (optioneel). ``wind`` is de automatisch opgehaalde Open-Meteo-winddata
     (optioneel; ``None`` bij zwemmen, geen GPS of geen internet).
     ``training_label`` is het sessielabel van de atleet (bijv.
-    "techniek/cadans"); None = normale sessie.
+    "techniek/cadans"); None = normale sessie. ``ftp`` (optioneel) is nodig
+    voor de tijd-in-vermogenszones van fietssessies met powerdata; zonder FTP
+    blijven die kolommen NULL (zie ``recompute_power_zones``).
     """
     if activity_exists(conn, act.activity_key):
         return False
@@ -196,6 +281,7 @@ def save_activity(
     # FIT-records opnieuw hoeft te parsen.
     pct_z2 = pct_in_zone2(tiz["Z1"], tiz["Z2"], tiz["Z3"], tiz["Z4"], tiz["Z5"])
     eff = aerobic_efficiency(act.sport, avg_speed, avg_hr)
+    power = _power_fields(act, ftp)
 
     conn.execute(
         """INSERT INTO activities (
@@ -204,10 +290,14 @@ def save_activity(
                pool_length, num_lengths, total_strokes,
                z1_s, z2_s, z3_s, z4_s, z5_s,
                pct_in_zone2, aerobic_efficiency,
+               avg_power, np_power, avg_cadence_excl0, max_cadence,
+               is_indoor, power_source, ef_watt,
+               p1_s, p2_s, p3_s, p4_s, p5_s, p6_s,
                user_note, training_label,
                wind_speed, wind_direction, wind_gusts, temperature_c,
                summary_json, source_file, imported_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             act.activity_key, act.sport, act.sub_sport, act.start_time.isoformat(),
             s.get("total_timer_time"), s.get("total_distance"),
@@ -220,6 +310,11 @@ def save_activity(
             s.get("total_strokes"),
             tiz["Z1"], tiz["Z2"], tiz["Z3"], tiz["Z4"], tiz["Z5"],
             pct_z2, eff,
+            power["avg_power"], power["np_power"],
+            power["avg_cadence_excl0"], power["max_cadence"],
+            power["is_indoor"], power["power_source"], power["ef_watt"],
+            power["p1_s"], power["p2_s"], power["p3_s"],
+            power["p4_s"], power["p5_s"], power["p6_s"],
             ((user_note or "").strip() or None),
             ((training_label or "").strip() or None),
             wind.speed_kmh if wind else None,
@@ -236,11 +331,12 @@ def save_activity(
         df["activity_key"] = act.activity_key
         df["timestamp"] = df["timestamp"].astype(str)
         # Zorg dat alle schemakolommen bestaan (zwemrecords missen bijv. cadans).
-        for col in ["heart_rate", "speed_ms", "distance_m", "cadence", "altitude_m"]:
+        for col in ["heart_rate", "speed_ms", "distance_m", "cadence", "power",
+                    "altitude_m"]:
             if col not in df:
                 df[col] = None
         df[["activity_key", "timestamp", "heart_rate", "speed_ms",
-            "distance_m", "cadence", "altitude_m"]].to_sql(
+            "distance_m", "cadence", "power", "altitude_m"]].to_sql(
             "records", conn, if_exists="append", index=False)
 
     if not act.lengths.empty:
@@ -296,6 +392,81 @@ def enrich_activity_summary(conn: sqlite3.Connection, act: ParsedActivity) -> bo
     )
     conn.commit()
     return True
+
+
+def enrich_power_records(conn: sqlite3.Connection, act: ParsedActivity,
+                         ftp: float | None = None) -> bool:
+    """Vul de powerdata van een al geïmporteerde fietssessie alsnog in.
+
+    Voor sessies die vóór de power-uitbreiding zijn geïmporteerd: de
+    ``power``-kolom in ``records`` bestond toen nog niet, dus bij een
+    herupload van dezelfde zip zetten we de seconde-data opnieuw (zelfde
+    bron, zelfde FIT-bestand) en vullen we de afgeleide kolommen (NP, EF,
+    cadans, bron, zones). Doet niets — en overschrijft dus nooit iets — als
+    de sessie al powerdata heeft of het geparste bestand geen power bevat.
+    Geeft True als er is aangevuld. Werkt ook op soft-verwijderde sessies.
+    """
+    if act.sport != "cycling" or act.records.empty \
+            or "power" not in act.records or not act.records["power"].notna().any():
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM activities WHERE activity_key = ?", (act.activity_key,)
+    ).fetchone()
+    if row is None:
+        return False
+    heeft_al = conn.execute(
+        "SELECT 1 FROM records WHERE activity_key = ? AND power IS NOT NULL LIMIT 1",
+        (act.activity_key,),
+    ).fetchone()
+    if heeft_al is not None:
+        return False
+
+    conn.execute("DELETE FROM records WHERE activity_key = ?", (act.activity_key,))
+    df = act.records.copy()
+    df["activity_key"] = act.activity_key
+    df["timestamp"] = df["timestamp"].astype(str)
+    for col in ["heart_rate", "speed_ms", "distance_m", "cadence", "power",
+                "altitude_m"]:
+        if col not in df:
+            df[col] = None
+    df[["activity_key", "timestamp", "heart_rate", "speed_ms",
+        "distance_m", "cadence", "power", "altitude_m"]].to_sql(
+        "records", conn, if_exists="append", index=False)
+
+    power = _power_fields(act, ftp)
+    conn.execute(
+        "UPDATE activities SET avg_power=?, np_power=?, avg_cadence_excl0=?, "
+        "max_cadence=?, is_indoor=?, power_source=?, ef_watt=?, "
+        "p1_s=?, p2_s=?, p3_s=?, p4_s=?, p5_s=?, p6_s=? WHERE activity_key=?",
+        (power["avg_power"], power["np_power"], power["avg_cadence_excl0"],
+         power["max_cadence"], power["is_indoor"], power["power_source"],
+         power["ef_watt"], power["p1_s"], power["p2_s"], power["p3_s"],
+         power["p4_s"], power["p5_s"], power["p6_s"], act.activity_key),
+    )
+    conn.commit()
+    return True
+
+
+def recompute_power_zones(conn: sqlite3.Connection, ftp: float | None) -> int:
+    """Herreken de tijd-in-vermogenszones van alle sessies met powerdata.
+
+    Nodig wanneer de FTP wordt gezet of gewijzigd: de p1..p6-kolommen zijn
+    (net als de HR-zones) bij import berekend met de toenmalige waarde.
+    ``ftp=None`` wist de zonetijden weer (terug naar "FTP onbekend"). Geeft
+    het aantal bijgewerkte sessies terug.
+    """
+    keys = [row[0] for row in conn.execute(
+        "SELECT DISTINCT activity_key FROM records WHERE power IS NOT NULL")]
+    for key in keys:
+        tip = time_in_power_zones(load_records(conn, key), ftp)
+        waarden = ([tip[naam] for naam in POWER_ZONE_NAMES]
+                   if ftp else [None] * len(POWER_ZONE_NAMES))
+        conn.execute(
+            "UPDATE activities SET p1_s=?, p2_s=?, p3_s=?, p4_s=?, p5_s=?, p6_s=? "
+            "WHERE activity_key=?", (*waarden, key),
+        )
+    conn.commit()
+    return len(keys)
 
 
 def set_training_label(conn: sqlite3.Connection, activity_key: str,

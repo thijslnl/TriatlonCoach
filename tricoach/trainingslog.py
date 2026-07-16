@@ -37,6 +37,15 @@ def kerncijfers(act: ParsedActivity) -> str:
         parts.append(f"{act.distance_m / 1000:.1f} km, {fmt_speed_kmh(speed)}")
         if s.get("total_ascent"):
             parts.append(f"{s['total_ascent']:.0f} hm")
+        # Vermogen (sinds de Rally/Kickr): gemiddeld + NP uit de samenvatting;
+        # oudere sessies hebben deze velden niet en slaan de regel gewoon over.
+        if s.get("avg_power"):
+            watt = f"gem {s['avg_power']:.0f} W"
+            if s.get("normalized_power"):
+                watt += f" (NP {s['normalized_power']:.0f} W)"
+            parts.append(watt)
+        if act.is_indoor:
+            parts.append("indoor (trainer)")
     elif act.sport == "swimming":
         parts.append(f"{act.distance_m:.0f} m op {fmt_pace_per_100m(speed)}")
         n = s.get("num_active_lengths") or s.get("num_lengths")

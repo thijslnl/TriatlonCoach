@@ -15,6 +15,7 @@ de hand geschreven achtergrond) blijft onaangeroerd.
 from datetime import date
 from pathlib import Path
 
+from tricoach.power import power_zone_bounds
 from tricoach.zones import bounds_from_lthr, zone_bounds
 
 START = "<!-- PROFIEL:START — beheerd door het dashboard, niet handmatig bewerken -->"
@@ -29,14 +30,23 @@ def _zones_text(athlete: dict) -> str:
             f"Z4 {b[2]}–{b[3] - 1} · Z5 {b[3]}+")
 
 
+def _power_zones_text(ftp: float) -> str:
+    """De afgeleide vermogenszones (Coggan) als één regel."""
+    b = [round(w) for w in power_zone_bounds(ftp)]
+    return (f"P1 <{b[0]} · P2 {b[0]}–{b[1]} · P3 {b[1]}–{b[2]} · "
+            f"P4 {b[2]}–{b[3]} · P5 {b[3]}–{b[4]} · P6 >{b[4]} W")
+
+
 def profile_block(config: dict) -> str:
     """Het beheerde profielblok als markdown (zonder de markers)."""
     a = config["athlete"]
+    ftp = a.get("ftp")
     regels = [
         "## Profiel (actueel — beheerd door het dashboard)",
         "",
         f"- **Max hartslag:** {a['max_hr']}",
         f"- **LTHR:** {a['lthr']} → zones (%LTHR): {_zones_text(a)}",
+        f"- **FTP (fietsen):** {f'{ftp} W → vermogenszones (Coggan): {_power_zones_text(ftp)}' if ftp else 'nog onbekend (geen FTP-test gedaan)'}",
         f"- **Trainingsdagen:** {a.get('training_days', '—') or '—'}",
         f"- **Beschikbare tijd per sessie:** {a.get('session_time', '—') or '—'}",
         "- **Racedoelen en streeftijden:**",
@@ -60,6 +70,7 @@ def _profile_values(config: dict) -> dict[str, str]:
     vals = {
         "Max hartslag": str(a.get("max_hr")),
         "LTHR": str(a.get("lthr")),
+        "FTP": str(a.get("ftp") or ""),
         "Trainingsdagen": str(a.get("training_days") or ""),
         "Beschikbare tijd per sessie": str(a.get("session_time") or ""),
     }

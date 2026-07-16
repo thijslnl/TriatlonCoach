@@ -5,6 +5,7 @@ athlete:
   name: Thijs
   max_hr: 193
   lthr: 170
+  ftp: null
   zone_pct_lthr:
   - 0.8
   - 0.89

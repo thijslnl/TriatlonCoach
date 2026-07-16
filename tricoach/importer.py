@@ -17,6 +17,7 @@ from tricoach.fit_parser import ParsedActivity, parse_zip
 from tricoach.storage import (
     activity_exists,
     enrich_activity_summary,
+    enrich_power_records,
     is_deleted,
     save_activity,
 )
@@ -78,6 +79,7 @@ def import_zip(
     (zo krijgt een herupload van oude zips de loopdynamiek alsnog binnen).
     """
     bounds = zone_bounds(config["athlete"])
+    ftp = config["athlete"].get("ftp") or None
     note = (user_note or "").strip() or None
     label = (training_label or "").strip() or None
     results = []
@@ -89,6 +91,10 @@ def import_zip(
         if activity_exists(conn, act.activity_key):
             status = "verwijderd" if is_deleted(conn, act.activity_key) else "duplicaat"
             enriched = enrich_activity_summary(conn, act)
+            # Herupload van een rit die vóór de power-uitbreiding is
+            # geïmporteerd: vul de vermogensdata (records + afgeleide
+            # kolommen) alsnog aan.
+            enriched = enrich_power_records(conn, act, ftp) or enriched
             results.append(ImportResult(act, status, enriched=enriched))
             continue
 
@@ -97,7 +103,7 @@ def import_zip(
         wind = weather_fn(act) if weather_fn else None
 
         save_activity(conn, act, bounds, user_note=note, wind=wind,
-                      training_label=label)
+                      training_label=label, ftp=ftp)
         append_entry(memory_dir, act, tiz, observation, user_note=note,
                      wind=wind, training_label=label)
         results.append(ImportResult(
