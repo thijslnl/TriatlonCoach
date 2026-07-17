@@ -1051,7 +1051,7 @@ with tab_voortgang:
             st.dataframe(prs, hide_index=True, width="stretch")
     with c2:
         st.subheader("🏊 Zwemprogressie")
-        aandeel, swolf_slag = swim_progression(conn, acts)
+        aandeel, swolf_sessie = swim_progression(conn, acts)
         if aandeel.empty:
             st.info("Nog geen zwemsessies met baandata.")
         else:
@@ -1066,20 +1066,22 @@ with tab_voortgang:
             fig.update_layout(title="Aandeel borstcrawl per sessie (doel: richting 100%)")
             pad_single_point(fig, aandeel["start_time"])
             chart(fig, show_legend=False)
-        if not swolf_slag.empty:
-            swolf_slag = swolf_slag.copy()
-            swolf_slag["Slag"] = swolf_slag["slag"].map(stroke_label)
+        if not swolf_sessie.empty:
             fig = px.line(
-                swolf_slag, x="start_time", y="swolf", color="Slag", markers=True,
-                color_discrete_map=STROKE_COLORS,
+                swolf_sessie, x="start_time", y="swolf", markers=True,
                 labels={"start_time": "Datum", "swolf": "SWOLF"},
             )
             fig.update_traces(
-                marker=dict(size=11),
-                hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: SWOLF %{y:.0f}<extra></extra>")
-            fig.update_layout(title="SWOLF per slagtype (lager = efficiënter)")
-            pad_single_point(fig, swolf_slag["start_time"])
-            chart(fig)
+                marker=dict(size=11), line=dict(color=SPORT_COLORS["Zwemmen"]),
+                hovertemplate="%{x|%d-%m-%Y} · SWOLF %{y:.0f}<extra></extra>")
+            fig.update_layout(
+                title="SWOLF per sessie — alleen crawl, 25m-bad "
+                      "(lager = efficiënter)")
+            pad_single_point(fig, swolf_sessie["start_time"])
+            chart(fig, show_legend=False)
+        elif not aandeel.empty:
+            st.info("Nog geen crawlbanen in het 25m-bad voor de SWOLF-trend "
+                    "(andere slagen en baanlengtes tellen niet mee).")
 
 # ------------------------------------------------------------------ sessie --
 with tab_sessie:

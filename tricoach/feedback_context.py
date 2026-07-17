@@ -50,6 +50,7 @@ from tricoach.removal import section_is_deleted
 from tricoach.rundynamics import dynamics_block
 from tricoach.schedule import schedule_as_text
 from tricoach.storage import load_activities, load_lengths, load_records
+from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 from tricoach.trainingslog import kerncijfers, zone_regel
 from tricoach.zones import intensity_category, zone_bounds
 
@@ -463,8 +464,9 @@ def _swim_row_line(conn: sqlite3.Connection, row: pd.Series) -> str:
                 f"slagritme gem. {s.mean():.1f} slagen/baan "
                 f"(min {s.min():.0f}, max {s.max():.0f})"
             )
-            swolf = (t + lengths["total_strokes"]).mean()
-            delen.append(f"SWOLF {swolf:.0f}")
+        swolf = crawl_swolf(lengths, row.get("pool_length"), row.get("distance_m"))
+        if swolf is not None:
+            delen.append(f"SWOLF {swolf:.0f} ({SWOLF_FILTER_LABEL})")
     regel = f"- {datum}: " + ", ".join(delen)
     if _note(row):
         regel += f" — opmerking atleet: \"{_note(row)}\""

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tricoach.config import load_config, resolve_path
 from tricoach.fit_parser import ParsedActivity, parse_zip
+from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 from tricoach.zones import time_in_zones, zone_bounds
 
 
@@ -60,8 +61,9 @@ def describe(act: ParsedActivity, bounds: list[int]) -> None:
         if not act.lengths.empty:
             per_stroke = act.lengths.groupby("swim_stroke").size().to_dict()
             print(f"  slagtypes (banen): {per_stroke}")
-            swolf = (act.lengths["total_timer_time"] + act.lengths["total_strokes"]).mean()
-            print(f"  gem. SWOLF: {swolf:.0f}")
+            swolf = crawl_swolf(act.lengths, s.get("pool_length"), act.distance_m)
+            if swolf is not None:
+                print(f"  gem. SWOLF ({SWOLF_FILTER_LABEL}): {swolf:.0f}")
 
     if not act.records.empty and "heart_rate" in act.records:
         tiz = time_in_zones(act.records, bounds)

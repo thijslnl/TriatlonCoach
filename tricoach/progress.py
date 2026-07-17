@@ -11,7 +11,8 @@ Vier blokken, allemaal gevoed door de SQLite-data:
 - **Racevoorspelling**: huidige niveaus vertaald naar de standaardafstanden
   (1,5 km zwemmen / 40 km fietsen / 10 km lopen).
 - **Records & zwemprogressie**: persoonlijke records en de ontwikkeling van
-  het crawl-aandeel en de SWOLF per slagtype.
+  het crawl-aandeel en de SWOLF (alleen crawlbanen in het 25m-bad, zodat
+  sessies vergelijkbaar zijn).
 """
 
 import math
@@ -23,6 +24,7 @@ import pandas as pd
 from tricoach.formatting import derive_speed_ms
 from tricoach.power import estimate_ftp, power_decoupling_trend, power_trend
 from tricoach.storage import load_lengths, load_records
+from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 
 
 def swim_speed_ms(conn: sqlite3.Connection, act: pd.Series) -> float | None:
@@ -427,6 +429,15 @@ def personal_records(conn: sqlite3.Connection, acts: pd.DataFrame) -> pd.DataFra
             sec = 100 / snelste_speed
             voeg_toe("Snelste 100 m (sessiegemiddelde)",
                      f"{int(sec // 60)}:{int(sec % 60):02d} /100m", snelste["start_time"])
+        beste_swolf, beste_swolf_act = None, None
+        for _, act in swims.iterrows():
+            sw = crawl_swolf(load_lengths(conn, act["activity_key"]),
+                             act.get("pool_length"), act.get("distance_m"))
+            if sw is not None and (beste_swolf is None or sw < beste_swolf):
+                beste_swolf, beste_swolf_act = sw, act
+        if beste_swolf is not None:
+            voeg_toe(f"Beste SWOLF ({SWOLF_FILTER_LABEL})",
+                     f"{beste_swolf:.0f}", beste_swolf_act["start_time"])
 
     return pd.DataFrame(records)
 
@@ -501,15 +512,20 @@ def progress_summary_text(conn: sqlite3.Connection, acts: pd.DataFrame) -> str:
                   for _, r in aandeel.iterrows()]
         delen.append("Crawl-aandeel per zwemsessie:\n" + "\n".join(regels))
     if not swolf.empty:
-        regels = [f"  - {r['start_time']:%d-%m} {r['slag']}: SWOLF {r['swolf']:.0f}"
+        regels = [f"  - {r['start_time']:%d-%m}: SWOLF {r['swolf']:.0f}"
                   for _, r in swolf.iterrows()]
-        delen.append("SWOLF per slagtype:\n" + "\n".join(regels))
+        delen.append(f"SWOLF per zwemsessie ({SWOLF_FILTER_LABEL}; andere "
+                     "slagen en baanlengtes tellen niet mee):\n" + "\n".join(regels))
 
     return "\n\n".join(delen)
 
 
 def swim_progression(conn: sqlite3.Connection, acts: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Zwemontwikkeling: (crawl-aandeel per sessie, SWOLF per slagtype per sessie)."""
+    """Zwemontwikkeling: (crawl-aandeel per sessie, SWOLF per sessie).
+
+    De SWOLF telt alleen crawlbanen in het 25m-bad mee (:func:`crawl_swolf`);
+    sessies zonder zulke banen ontbreken in de SWOLF-reeks.
+    """
     swims = acts[acts["sport"] == "swimming"].sort_values("start_time")
     aandeel_rows, swolf_rows = [], []
     for _, act in swims.iterrows():
@@ -522,9 +538,7 @@ def swim_progression(conn: sqlite3.Connection, acts: pd.DataFrame) -> tuple[pd.D
             "start_time": act["start_time"],
             "crawl_pct": (lengths["swim_stroke"] == "freestyle").mean() * 100,
         })
-        per_slag = lengths.assign(
-            swolf=lengths["total_timer_time"] + lengths["total_strokes"]
-        ).groupby("swim_stroke")["swolf"].mean()
-        for slag, swolf in per_slag.items():
-            swolf_rows.append({"start_time": act["start_time"], "slag": slag, "swolf": swolf})
+        swolf = crawl_swolf(lengths, act.get("pool_length"), act.get("distance_m"))
+        if swolf is not None:
+            swolf_rows.append({"start_time": act["start_time"], "swolf": swolf})
     return pd.DataFrame(aandeel_rows), pd.DataFrame(swolf_rows)

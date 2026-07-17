@@ -16,6 +16,7 @@ from tricoach.formatting import (
     local_time,
     sport_label,
 )
+from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 
 HEADER = """# Trainingslog
 
@@ -51,9 +52,9 @@ def kerncijfers(act: ParsedActivity) -> str:
         n = s.get("num_active_lengths") or s.get("num_lengths")
         if n and s.get("pool_length"):
             parts.append(f"{n} banen à {s['pool_length']:.0f}m")
-        if not act.lengths.empty:
-            swolf = (act.lengths["total_timer_time"] + act.lengths["total_strokes"]).mean()
-            parts.append(f"SWOLF {swolf:.0f}")
+        swolf = crawl_swolf(act.lengths, s.get("pool_length"), act.distance_m)
+        if swolf is not None:
+            parts.append(f"SWOLF {swolf:.0f} ({SWOLF_FILTER_LABEL})")
 
     if s.get("avg_heart_rate"):
         parts.append(f"HR gem {s['avg_heart_rate']} / max {s.get('max_heart_rate', '-')}")

@@ -13,6 +13,7 @@ import pandas as pd
 from tricoach.formatting import derive_speed_ms
 from tricoach.progress import trimp_per_session
 from tricoach.storage import load_records
+from tricoach.swim import crawl_swolf, lane_meters
 from tricoach.zones import ZONE_NAMES, intensity_category
 
 
@@ -220,32 +221,6 @@ def run_power(activities: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def lane_meters(lengths: pd.DataFrame, pool_length: float | None,
-                distance_m: float | None) -> pd.Series:
-    """Afstand per baan (m), robuust voor banen van wisselende lengte.
-
-    Normaal is elke baan simpelweg ``pool_length``. Maar als de totale
-    sessieafstand duidelijk afwijkt van banen × baanlengte (bijv. het zwembad
-    ging halverwege van 25 m- naar 15 m-banen, terwijl het horloge op 25 m
-    bleef staan), dan is dát niet meer waar. In dat geval verdelen we de
-    sessieafstand naar rato van het aantal slagen per baan: een kortere baan
-    kost evenredig minder slagen, en het sessietotaal klopt weer. Dit is een
-    schatting per baan, maar veel eerlijker dan elke baan even lang rekenen.
-    """
-    n = len(lengths)
-    pool = float(pool_length) if pool_length and not pd.isna(pool_length) else 25.0
-    uniform = pd.Series([pool] * n, index=lengths.index)
-    if not distance_m or pd.isna(distance_m) or n == 0:
-        return uniform
-    if abs(n * pool - distance_m) <= 0.02 * distance_m:
-        return uniform
-    slagen = pd.to_numeric(lengths.get("total_strokes"), errors="coerce")
-    if slagen.isna().any() or slagen.sum() <= 0:
-        # Geen bruikbare slagdata: gemiddelde afstand per baan als terugval.
-        return pd.Series([distance_m / n] * n, index=lengths.index)
-    return slagen / slagen.sum() * distance_m
-
-
 def swim_length_matrix(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
     """Tempo per baan per zwemsessie als matrix voor een heatmap.
 
@@ -291,9 +266,10 @@ def stroke_distribution(conn: sqlite3.Connection, activities: pd.DataFrame) -> p
 def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.DataFrame:
     """SWOLF en tempo per zwemsessie, voor de zwemtrend-grafiek.
 
-    De SWOLF telt alleen crawlbanen van ~25 m mee: andere slagen en andere
-    baanlengtes geven wezenlijk andere waarden, waardoor sessies onderling
-    niet vergelijkbaar zouden zijn. Sessies zonder zulke banen krijgen None.
+    De SWOLF telt alleen crawlbanen van ~25 m mee (zie :func:`crawl_swolf`):
+    andere slagen en andere baanlengtes geven wezenlijk andere waarden,
+    waardoor sessies onderling niet vergelijkbaar zouden zijn. Sessies
+    zonder zulke banen krijgen None.
     """
     swims = activities[activities["sport"] == "swimming"].copy()
     if swims.empty:
@@ -303,14 +279,7 @@ def swim_per_session(conn: sqlite3.Connection, activities: pd.DataFrame) -> pd.D
         lengths = pd.read_sql_query(
             "SELECT * FROM lengths WHERE activity_key = ?",
             conn, params=(act["activity_key"],))
-        swolf = None
-        if not lengths.empty:
-            meters = lane_meters(lengths, act.get("pool_length"), act.get("distance_m"))
-            crawl_25m = lengths[(lengths["swim_stroke"] == "freestyle")
-                                & ((meters - 25.0).abs() <= 1.0)]
-            if not crawl_25m.empty:
-                swolf = (crawl_25m["total_timer_time"]
-                         + crawl_25m["total_strokes"]).mean()
+        swolf = crawl_swolf(lengths, act.get("pool_length"), act.get("distance_m"))
         # Tempo uit afstand en de zuivere zwemtijd (som van de actieve banen),
         # niet uit avg_speed_ms: dat veld ontbreekt op sommige sessies (bijv.
         # een samengevoegde zwemsessie) waardoor die anders uit de grafiek viel.
