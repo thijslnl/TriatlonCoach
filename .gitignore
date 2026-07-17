@@ -1,9 +1,17 @@
 # Secrets en API-sleutels
 .env
 
-# Persoonlijke data (trainingen, gezondheid, geheugen)
+# Persoonlijke data (trainingen, gezondheid, geheugen). FIT-bestanden
+# bevatten GPS-routes vanaf huis, hartslag- en gezondheidsdata — die horen
+# niet in een repository, ook niet in een private. Alleen de lege
+# .gitkeep gaat mee zodat de archiefmap bij een verse clone bestaat.
 data/
 memory/
+uploads/*
+!uploads/.gitkeep
+garmin_import/
+*.fit
+*.FIT
 
 # Python
 __pycache__/

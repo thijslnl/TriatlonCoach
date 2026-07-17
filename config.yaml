@@ -70,3 +70,4 @@ paths:
   database: data/training.db
   memory_dir: memory
   import_dir: garmin_import
+  uploads_dir: uploads

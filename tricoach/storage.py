@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS activities (
     wind_direction REAL,
     wind_gusts     REAL,
     temperature_c  REAL,
+    excluded_reason  TEXT,
+    archived_path    TEXT,
+    original_missing INTEGER,
     summary_json  TEXT,
     source_file   TEXT,
     imported_at   TEXT,
@@ -153,6 +156,18 @@ _ADDED_COLUMNS = {
     # de kolom eenmalig herrekend (zie _migrate/recompute_active_time), zodat
     # trends niet halverwege van definitie wisselen.
     "active_s": "REAL",
+    # Uitsluiting van trainingsanalyses (zie tricoach.transport): "transport"
+    # = geen training (ritje naar het zwembad, boodschappen). De sessie blijft
+    # zichtbaar en telt mee in weektotalen/belasting, maar niet in trends,
+    # records, zone-statistieken, brick-detectie en de feedback-vergelijking.
+    # NULL = gewone trainingssessie.
+    "excluded_reason": "TEXT",
+    # Origineel-archief (zie tricoach.archive): het pad (relatief aan de
+    # projectroot) van de actieve archiefversie van het originele FIT-bestand,
+    # en de markering dat er géén origineel meer bestaat (sessies van vóór het
+    # archief) zodat verificatieruns die sessies kunnen overslaan.
+    "archived_path": "TEXT",
+    "original_missing": "INTEGER",
 }
 
 
@@ -176,6 +191,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # tijdsbasis hebben. Idempotent: daarna is er niets meer te doen.
     if have and "active_s" not in have:
         recompute_active_time(conn)
+    # Datamigratie voor het origineel-archief, idempotent op de data (niet op
+    # het schema): elke sessie zonder geregistreerd origineel — geïmporteerd
+    # vóór het archief bestond, of waarvan het archiveren ooit mislukte —
+    # krijgt de markering "origineel ontbreekt", zodat verificatieruns haar
+    # overslaan in plaats van falen. Duikt het origineel later alsnog op
+    # (herupload, of tricoach.archive.migrate_originals), dan wist
+    # set_archived_path de markering weer. Invariant na elke connect: een rij
+    # heeft óf een archived_path, óf original_missing = 1.
+    conn.execute(
+        "UPDATE activities SET original_missing = 1 "
+        "WHERE archived_path IS NULL AND original_missing IS NULL")
+    conn.commit()
 
 
 def recompute_active_time(conn: sqlite3.Connection) -> int:
@@ -534,12 +561,65 @@ def set_training_label(conn: sqlite3.Connection, activity_key: str,
     return cur.rowcount > 0
 
 
+def set_excluded_reason(conn: sqlite3.Connection, activity_key: str,
+                        reason: str | None) -> bool:
+    """Zet of wis de uitsluitingsreden van een sessie (bijv. "transport").
+
+    Een gezette reden haalt de sessie uit trends, records, zone-statistieken,
+    brick-detectie en de feedback-vergelijking (zie :func:`training_activities`);
+    de sessie blijft zichtbaar en telt mee in weektotalen en belasting.
+    ``None`` maakt er weer een gewone training van. Geeft True als er een rij
+    is geraakt.
+    """
+    cur = conn.execute(
+        "UPDATE activities SET excluded_reason = ? WHERE activity_key = ?",
+        (((reason or "").strip() or None), activity_key),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def set_archived_path(conn: sqlite3.Connection, activity_key: str,
+                      archived_path: str) -> bool:
+    """Registreer de actieve archiefversie van het originele FIT-bestand.
+
+    ``archived_path`` is relatief aan de projectroot (bijv.
+    ``uploads/2026/07/2026-07-17_0822_23627119348.fit``). Zet meteen
+    ``original_missing`` terug op NULL: er ís nu een origineel. Geeft True
+    als er een rij is geraakt (de sessie kan ook soft-verwijderd zijn).
+    """
+    cur = conn.execute(
+        "UPDATE activities SET archived_path = ?, original_missing = NULL "
+        "WHERE activity_key = ?",
+        (str(archived_path), activity_key),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def training_activities(acts: pd.DataFrame) -> pd.DataFrame:
+    """Alleen de échte trainingen: sessies met een ``excluded_reason``
+    (transport/casual) eruit gefilterd.
+
+    Dit is het ene filterpunt voor de transport-markering, zoals
+    :func:`load_activities` dat is voor soft deletes: trends, records,
+    zone-statistieken, brick-detectie en de feedback-vergelijking rekenen op
+    deze subset. Weektotalen en belastingsoverzichten gebruiken juist de
+    volledige set (compleet belastingsbeeld).
+    """
+    if acts.empty or "excluded_reason" not in acts:
+        return acts
+    return acts[acts["excluded_reason"].isna()]
+
+
 def load_activities(conn: sqlite3.Connection) -> pd.DataFrame:
     """Alle niet-verwijderde sessies als DataFrame, nieuwste eerst.
 
     Dit is het ene filterpunt voor soft deletes: alles wat sessies toont of
     meerekent (tabellen, grafieken, trends, weekvolume, feedback-context)
-    leest via deze functie en ziet verwijderde sessies dus niet.
+    leest via deze functie en ziet verwijderde sessies dus niet. Sessies met
+    een ``excluded_reason`` (transport) zitten er wél in; filter die waar
+    nodig weg met :func:`training_activities`.
     """
     df = pd.read_sql_query(
         "SELECT * FROM activities WHERE deleted_at IS NULL "

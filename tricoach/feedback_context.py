@@ -50,7 +50,12 @@ from tricoach.memory_review import freshness_warnings
 from tricoach.removal import section_is_deleted
 from tricoach.rundynamics import dynamics_block
 from tricoach.schedule import schedule_as_text
-from tricoach.storage import load_activities, load_lengths, load_records
+from tricoach.storage import (
+    load_activities,
+    load_lengths,
+    load_records,
+    training_activities,
+)
 from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 from tricoach.trainingslog import kerncijfers, zone_regel
 from tricoach.zones import intensity_category, zone_bounds
@@ -402,9 +407,17 @@ def session_block(
 
 # ------------------------------------------------------- vergelijkbare historie --
 
-def _prev_activities(conn: sqlite3.Connection, act: ParsedActivity) -> pd.DataFrame:
-    """Alle sessies van vóór de huidige, nieuwste eerst."""
+def _prev_activities(conn: sqlite3.Connection, act: ParsedActivity,
+                     include_transport: bool = False) -> pd.DataFrame:
+    """Alle sessies van vóór de huidige, nieuwste eerst.
+
+    Transport-ritjes (``excluded_reason``) blijven standaard buiten beeld:
+    die mogen nooit als "vorige vergelijkbare sessie" of trendpunt dienen.
+    Alleen het belastingsoverzicht (:func:`recent_load_block`) neemt ze mee.
+    """
     acts = load_activities(conn)
+    if not include_transport:
+        acts = training_activities(acts)
     if acts.empty:
         return acts
     start = pd.Timestamp(act.start_time)
@@ -528,7 +541,7 @@ def pace_history_block(conn: sqlite3.Connection, act: ParsedActivity,
     """
     if act.sport not in ("running", "cycling"):
         return None
-    acts = load_activities(conn)
+    acts = training_activities(load_activities(conn))
     trend = pace_at_hr(conn, acts, act.sport, z2)
     if trend.empty:
         return "(nog geen eerdere sessies met genoeg tijd in zone 2)"
@@ -587,8 +600,12 @@ def power_history_block(conn: sqlite3.Connection, act: ParsedActivity) -> str | 
 
 def recent_load_block(conn: sqlite3.Connection, act: ParsedActivity,
                       days: int = LOAD_DAYS) -> str:
-    """Alle sessies van de laatste ~10 dagen, voor herstelbewust advies."""
-    prev = _prev_activities(conn, act)
+    """Alle sessies van de laatste ~10 dagen, voor herstelbewust advies.
+
+    Transport-ritjes tellen hier wél mee (compleet belastingsbeeld) maar
+    staan gemarkeerd, zodat de coach ze niet als training interpreteert.
+    """
+    prev = _prev_activities(conn, act, include_transport=True)
     if prev.empty:
         return "(geen eerdere sessies)"
     start = pd.Timestamp(act.start_time)
@@ -602,10 +619,14 @@ def recent_load_block(conn: sqlite3.Connection, act: ParsedActivity,
     for _, row in window.iloc[::-1].iterrows():  # oudste eerst
         cat = intensity_category(
             row["z1_s"], row["z2_s"], row["z3_s"], row["z4_s"], row["z5_s"])
+        transport = row.get("excluded_reason")
+        transport = (transport is not None
+                     and not (isinstance(transport, float) and pd.isna(transport)))
         regels.append(
             f"- {_local(row['start_time']):%a %d-%m}: {sport_label(row['sport'])}, "
             f"{fmt_duration(row['duration_s'])}"
             + (f", {cat}" if cat else "")
+            + (" (transport/verplaatsing, geen training)" if transport else "")
         )
     return "\n".join(regels)
 
@@ -728,7 +749,10 @@ def build_feedback_context(
     # Sluit deze sessie een brick of triatlon-training af (eerdere onderdelen
     # van vandaag, kort ervoor, in racevolgorde)? Dan gaan de wisseltijden en
     # de bakstenen-benen-analyse als eigen blok mee, direct na de sessie zelf.
-    combo = combo_block(conn, act, load_activities(conn), config, load_records)
+    # Transport-ritjes (naar het zwembad fietsen) doen niet mee: die zijn
+    # geen brick-onderdeel, hoe mooi ze ook op een wissel lijken.
+    combo = combo_block(conn, act, training_activities(load_activities(conn)),
+                        config, load_records)
     if combo:
         blocks.append(
             "# Combinatietraining (brick/triatlon) — wissel- en overgangsdata\n\n"
@@ -766,7 +790,8 @@ def build_feedback_context(
     # Versheidscheck: verouderde of aantoonbaar achterhaalde profielcontext
     # gaat expliciet gemarkeerd mee, zodat de coach hem niet klakkeloos
     # overneemt (zie tricoach.memory_review).
-    vers = freshness_warnings(memory_dir, conn, load_activities(conn))
+    vers = freshness_warnings(memory_dir, conn,
+                              training_activities(load_activities(conn)))
     if vers:
         blocks.append(
             "# Let op: mogelijk verouderde profielcontext\n\n"

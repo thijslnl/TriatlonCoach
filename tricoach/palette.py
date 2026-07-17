@@ -23,7 +23,10 @@ SEQ_BLUE = [
 # assen/bijschriften, "ref_line" voor richtwaarde-lijnen, "surface" is het
 # grafiekoppervlak waartegen het palet gevalideerd is.
 _LICHT = {
-    "sport": {"Hardlopen": "#e34948", "Fietsen": "#2a78d6", "Zwemmen": "#1baf7a"},
+    # "Transport" (verplaatsingen, geen training) is bewust de gedempte
+    # grijstint: het hoort zichtbaar maar onnadrukkelijk in het weekvolume.
+    "sport": {"Hardlopen": "#e34948", "Fietsen": "#2a78d6", "Zwemmen": "#1baf7a",
+              "Transport": "#898781"},
     "zones": ["#1c5cab", "#008300", "#eda100", "#eb6834", "#b93534"],
     # Algemene categorische reeks (vaste volgorde, nooit cyclen) voor
     # categorieën zónder eigen betekeniskleur, zoals zwemslagen.
@@ -38,7 +41,8 @@ _LICHT = {
 }
 
 _DONKER = {
-    "sport": {"Hardlopen": "#e66767", "Fietsen": "#3987e5", "Zwemmen": "#199e70"},
+    "sport": {"Hardlopen": "#e66767", "Fietsen": "#3987e5", "Zwemmen": "#199e70",
+              "Transport": "#898781"},
     "zones": ["#3987e5", "#008300", "#c98500", "#d95926", "#e66767"],
     "cats": ["#3987e5", "#199e70", "#c98500", "#008300",
              "#9085e9", "#e66767", "#d55181", "#d95926"],

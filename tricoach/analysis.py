@@ -25,9 +25,25 @@ def add_week(activities: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _transport_as_sport(df: pd.DataFrame) -> pd.DataFrame:
+    """Geef transport-sessies (excluded_reason) de pseudo-sport "transport".
+
+    Zo verschijnen ze in weekvolumes en -totalen als eigen categorie in
+    plaats van dat een ritje naar het zwembad als fietstraining meetelt.
+    """
+    df = df.copy()
+    if "excluded_reason" in df:
+        df.loc[df["excluded_reason"].notna(), "sport"] = "transport"
+    return df
+
+
 def weekly_volume(activities: pd.DataFrame) -> pd.DataFrame:
-    """Trainingsuren per week per sport (lange vorm: week, sport, uren)."""
-    df = add_week(activities)
+    """Uren per week per sport (lange vorm: week, sport, uren).
+
+    Transport-sessies tellen mee — het weekvolume is het complete
+    belastingsbeeld — maar als aparte categorie "transport".
+    """
+    df = _transport_as_sport(add_week(activities))
     out = (
         df.groupby(["week", "sport"], as_index=False)["duration_s"].sum()
         .rename(columns={"duration_s": "uren"})
@@ -78,9 +94,11 @@ def weekly_totals(activities: pd.DataFrame) -> pd.DataFrame:
     kilometers en TRIMP per week, nieuwste week eerst.
 
     ``delta_uren`` is het verschil in trainingsuren met de eerstvolgende
-    oudere week in de tabel.
+    oudere week in de tabel. Transport-sessies tellen mee in de totalen
+    (compleet belastingsbeeld) maar staan als eigen kolom ``uren_transport``
+    in plaats van bij de sport.
     """
-    df = add_week(activities)
+    df = _transport_as_sport(add_week(activities))
     df["trimp"] = trimp_per_session(activities)["trimp"]
     per_week = df.groupby("week").agg(
         sessies=("activity_key", "count"),
@@ -91,7 +109,7 @@ def weekly_totals(activities: pd.DataFrame) -> pd.DataFrame:
     per_week["uren"] = per_week["uren"] / 3600
     per_week["km"] = per_week["km"] / 1000
     per_sport = (df.groupby(["week", "sport"])["duration_s"].sum() / 3600).unstack()
-    for sport in ("swimming", "cycling", "running"):
+    for sport in ("swimming", "cycling", "running", "transport"):
         kolom = per_sport[sport] if sport in per_sport else 0.0
         per_week[f"uren_{sport}"] = kolom
     per_week = per_week.fillna(0.0).sort_index(ascending=False).reset_index()

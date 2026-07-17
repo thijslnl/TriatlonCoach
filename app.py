@@ -108,6 +108,7 @@ from tricoach.viz import (
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
 from tricoach.feedback_context import hr_drift_values, run_splits_df
+from tricoach.archive import migrate_originals, uploads_root
 from tricoach.removal import purge_session, remove_session, restore_session
 from tricoach.storage import (
     connect,
@@ -119,7 +120,9 @@ from tricoach.storage import (
     recompute_zones,
     set_training_label,
     swim_active_seconds,
+    training_activities,
 )
+from tricoach.transport import is_transport, mark_transport, unmark_transport
 from tricoach.weather import wind_for_activity
 from tricoach.zones import bounds_from_lthr, zone_bounds
 
@@ -134,6 +137,8 @@ Z2 = (BOUNDS[0], BOUNDS[1] - 1)  # Z2-bereik, bijv. 137-151
 # waarde op de instellingen-tab staat — power wordt dan zonder zones getoond.
 FTP = config["athlete"].get("ftp") or None
 MEMORY_DIR = resolve_path(config, "memory_dir")
+# Origineel-archief van alle geüploade FIT-bestanden (zie tricoach.archive).
+UPLOADS_DIR = uploads_root(config)
 TZ = "Europe/Amsterdam"  # Garmin slaat tijden op in UTC; tonen in lokale tijd
 
 # Vaste kleuren zodat sporten en zones in elke grafiek hetzelfde ogen.
@@ -285,6 +290,7 @@ with st.sidebar:
                     weather_fn=lambda act: wind_for_activity(act, MEMORY_DIR),
                     user_note=user_note,
                     training_label=upload_label,
+                    uploads_dir=UPLOADS_DIR,
                 )
                 for r in results:
                     icon = {"nieuw": "✅", "duplicaat": "↩️"}.get(r.status, "🗑️")
@@ -302,7 +308,16 @@ with st.sidebar:
                         st.caption(f"🌬️ Wind: {r.wind.as_text()}")
                     # Alleen nieuwe sessies krijgen coaching-feedback (Sonnet);
                     # duplicaten niet, dat zou onnodig een API-call kosten.
-                    if r.status == "nieuw":
+                    # Bij een transport-vermoeden (korte, rustige fietsrit)
+                    # wordt de feedback uitgesteld tot de gebruiker de
+                    # suggestie bovenaan de pagina bevestigt of afwijst —
+                    # transport-ritjes horen geen coach-feedback te krijgen.
+                    if r.status == "nieuw" and r.transport_suggested:
+                        st.session_state.setdefault("transport_suggesties", []).append(r)
+                        st.caption(
+                            "🛒 Lijkt een transport-ritje (kort en rustig) — "
+                            "bevestig of wijs af bovenaan de pagina.")
+                    elif r.status == "nieuw":
                         try:
                             fb = generate_feedback(
                                 router_upload, conn, MEMORY_DIR, config,
@@ -323,6 +338,22 @@ with st.sidebar:
 
 # ------------------------------------------------------------------- data --
 conn = get_conn()
+
+
+@st.cache_resource(show_spinner=False)
+def archief_inhaalslag() -> int:
+    """Eenmalig per serverstart: sluimerende originelen (oude importmap)
+    alsnog in het uploads-archief zetten; zie tricoach.archive."""
+    c = get_conn()
+    try:
+        return migrate_originals(c, UPLOADS_DIR,
+                                 [resolve_path(config, "import_dir")])
+    finally:
+        c.close()
+
+
+archief_inhaalslag()
+
 acts = load_activities(conn)
 
 if acts.empty:
@@ -331,6 +362,11 @@ if acts.empty:
 
 acts["start_time"] = acts["start_time"].dt.tz_convert(TZ)
 acts["Sport"] = acts["sport"].map(sport_label)
+# De analysesubset: alles behalve als-transport-gemarkeerde sessies. Trends,
+# records, zone-statistieken en brick-detectie rekenen hierop; de volledige
+# `acts` blijft voor weektotalen, belasting en de sessielijst (daar staan
+# transport-ritjes gedimd bij).
+trainingen = training_activities(acts)
 # Eén keer per rerun: de zuivere zwemtijd per sessie (som van actieve banen),
 # gebruikt door de sessietabel, de tempografieken en het sessie-detail.
 zwem_actief = swim_active_seconds(conn)
@@ -338,57 +374,60 @@ zwem_actief = swim_active_seconds(conn)
 # Combinatietrainingen: detecteer nieuwe brick-/triatlonvoorstellen (goedkoop,
 # alleen sessie-metadata) en haal het lidmaatschap op voor de sessietabel.
 # Voorstellen worden nooit stilzwijgend samengevoegd: bevestigen of losmaken
-# gebeurt op de 🧱 Bricks-tab.
-detect_and_store_proposals(conn, acts, max_gap_min(config))
+# gebeurt op de 🧱 Bricks-tab. Transport-ritjes doen niet mee: terugfietsen
+# van het zwembad is geen brick.
+detect_and_store_proposals(conn, trainingen, max_gap_min(config))
 combo_leden = combo_membership(conn)
 
 router = LLMRouter(config, MEMORY_DIR)
 
 # Cache rond de berekeningen die alle seconde-records doorlopen: die worden
 # anders bij elke rerun (elke klik) opnieuw gedaan en groeien mee met de
-# database. De datastand (aantal sessies + nieuwste sessie) is de cachesleutel:
-# na een upload verandert die en wordt alles vers berekend.
-DATA_VERSIE = (len(acts), acts["start_time"].max().isoformat())
+# database. De datastand (aantal sessies + nieuwste sessie + aantal
+# transport-markeringen) is de cachesleutel: na een upload of een (de)markering
+# verandert die en wordt alles vers berekend.
+DATA_VERSIE = (len(acts), acts["start_time"].max().isoformat(),
+               int(acts["excluded_reason"].notna().sum()))
 
 
 @st.cache_data(show_spinner=False)
 def cache_pace_at_hr(sport: str, bereik: tuple, versie: tuple) -> pd.DataFrame:
-    return pace_at_hr(conn, acts, sport, bereik)
+    return pace_at_hr(conn, trainingen, sport, bereik)
 
 
 @st.cache_data(show_spinner=False)
 def cache_decoupling(versie: tuple) -> pd.DataFrame:
-    return decoupling(conn, acts)
+    return decoupling(conn, trainingen)
 
 
 @st.cache_data(show_spinner=False)
 def cache_personal_records(versie: tuple) -> pd.DataFrame:
-    return personal_records(conn, acts)
+    return personal_records(conn, trainingen)
 
 
 @st.cache_data(show_spinner=False)
 def cache_best_efforts(versie: tuple) -> pd.DataFrame:
-    return best_efforts(conn, acts)
+    return best_efforts(conn, trainingen)
 
 
 @st.cache_data(show_spinner=False)
 def cache_prediction_history(race_in: dict, versie: tuple) -> pd.DataFrame:
-    return race_prediction_history(conn, acts, race_in)
+    return race_prediction_history(conn, trainingen, race_in)
 
 
 @st.cache_data(show_spinner=False)
 def cache_css(versie: tuple) -> dict | None:
-    return css_estimate(conn, acts)
+    return css_estimate(conn, trainingen)
 
 
 @st.cache_data(show_spinner=False)
 def cache_power_decoupling(versie: tuple) -> pd.DataFrame:
-    return power_decoupling_trend(conn, acts)
+    return power_decoupling_trend(conn, trainingen)
 
 
 @st.cache_data(show_spinner=False)
 def cache_ftp_estimate(versie: tuple) -> dict | None:
-    return estimate_ftp(conn, acts)
+    return estimate_ftp(conn, trainingen)
 
 
 def render_upload_feedback():
@@ -423,6 +462,61 @@ def render_upload_feedback():
                 st.divider()
 
 
+def render_transport_suggesties():
+    """Vraag per vermoedelijk transport-ritje om bevestiging, bovenaan de pagina.
+
+    De import markeert nooit zelf (zie tricoach.transport): hier kiest de
+    gebruiker met één klik. "Ja" markeert de sessie als transport (geen
+    feedback, telt niet mee in trends); "Nee" laat de uitgestelde
+    coach-feedback alsnog genereren.
+    """
+    suggesties = st.session_state.get("transport_suggesties")
+    if not suggesties:
+        return
+    with st.container(border=True):
+        st.subheader("🛒 Transport-ritje?")
+        st.caption(
+            "Deze uploads lijken verplaatsingen (korte fietsrit, hartslag "
+            "onder trainingsintensiteit). Als transport tellen ze wél mee in "
+            "je weektotalen en belasting, maar niet in trends, records en "
+            "de feedback-vergelijking. Achteraf aanpassen kan op de 🔍 Sessie-tab."
+        )
+        for r in list(suggesties):
+            key = r.activity.activity_key
+            info, ja, nee = st.columns([4, 1, 2])
+            info.write(
+                f"**{local_time(r.activity.start_time):%d-%m %H:%M}** · "
+                f"{sport_label(r.activity.sport)} · "
+                f"{r.activity.distance_m / 1000:.1f} km · "
+                f"HR gem {r.activity.summary.get('avg_heart_rate', '—')}"
+            )
+            if ja.button("✅ Ja, transport", key=f"transport_ja_{key}"):
+                c = get_conn()
+                mark_transport(c, MEMORY_DIR, key)
+                c.close()
+                suggesties.remove(r)
+                st.toast("Gemarkeerd als transport — geen coach-feedback nodig.")
+                st.rerun()
+            if nee.button("➖ Nee, gewone training", key=f"transport_nee_{key}"):
+                suggesties.remove(r)
+                # De bij de import uitgestelde feedback alsnog genereren.
+                try:
+                    with st.spinner("Coach-feedback genereren..."):
+                        c = get_conn()
+                        fb = generate_feedback(
+                            router, c, MEMORY_DIR, config,
+                            r.activity, r.tiz, r.observation,
+                            user_note=r.user_note, wind=r.wind,
+                            training_label=r.training_label,
+                        )
+                        c.close()
+                    st.session_state.setdefault("upload_feedback", []).append(fb)
+                except Exception as e:
+                    st.warning(f"Feedback overgeslagen: {e}")
+                st.rerun()
+
+
+render_transport_suggesties()
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
@@ -436,15 +530,24 @@ render_upload_feedback()
 # --------------------------------------------------------------- overzicht --
 with tab_overzicht:
     week_ago = pd.Timestamp.now(tz=TZ) - pd.Timedelta(days=7)
+    # Volume-metrics op álle sessies (compleet belastingsbeeld, incl.
+    # transport); de zone-aandelen alleen op echte trainingen.
     recent = acts[acts["start_time"] >= week_ago]
+    recent_training = trainingen[trainingen["start_time"] >= week_ago]
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sessies (7 dagen)", len(recent))
+    n_transport = len(recent) - len(recent_training)
+    c1.metric("Sessies (7 dagen)", len(recent),
+              help=f"Waarvan {n_transport} transport/verplaatsing."
+              if n_transport else None)
     c2.metric("Trainingsuren (7 dagen)", f"{recent['duration_s'].sum() / 3600:.1f}")
-    z2_share = recent["z2_s"].sum() / max(recent["duration_s"].sum(), 1) * 100
+    z2_share = (recent_training["z2_s"].sum()
+                / max(recent_training["duration_s"].sum(), 1) * 100)
     c3.metric("Aandeel zone 2 (7 dagen)", f"{z2_share:.0f}%",
-              help="Doel: dit omhoog krijgen — je traint structureel te hard.")
-    hard = (recent["z4_s"].sum() + recent["z5_s"].sum()) / max(recent["duration_s"].sum(), 1) * 100
+              help="Doel: dit omhoog krijgen — je traint structureel te hard. "
+                   "Transport-ritjes tellen hier niet mee.")
+    hard = ((recent_training["z4_s"].sum() + recent_training["z5_s"].sum())
+            / max(recent_training["duration_s"].sum(), 1) * 100)
     c4.metric("Aandeel zone 4+5 (7 dagen)", f"{hard:.0f}%")
 
     col_links, col_rechts = st.columns(2)
@@ -465,7 +568,7 @@ with tab_overzicht:
 
     with col_rechts:
         st.subheader("Tijd in hartslagzones per week")
-        tz_df = weekly_zone_time(acts)
+        tz_df = weekly_zone_time(trainingen)
         tz_df["zone"] = tz_df["zone"].map(ZONE_LABELS)
         als_pct = st.toggle(
             "Toon als percentage", key="zonetijd_pct",
@@ -532,8 +635,12 @@ with tab_overzicht:
     chart(fig)
 
     st.subheader("Recente sessies")
-    trend = aerobic_efficiency_trend(acts)
+    trend = aerobic_efficiency_trend(trainingen)
     tabel = acts.head(15).copy()
+    # Transport-ritjes blijven zichtbaar (compleet logboek) maar gedimd en
+    # met label; markeren/demarkeren gebeurt op de 🔍 Sessie-tab.
+    tabel["is_transport"] = tabel.apply(is_transport, axis=1)
+    tabel.loc[tabel["is_transport"], "Sport"] += " · 🛒 transport"
     tabel["Duur"] = pd.to_datetime(tabel["duration_s"], unit="s").dt.time
     tabel["Afstand"] = tabel["distance_m"] / 1000
     # Tempo/snelheid op de actieve tijd (zie tricoach.timebasis): rust aan de
@@ -586,11 +693,18 @@ with tab_overzicht:
                  "Tempo / snelheid", "Vermogen", "Cadans", "% Z2", "Zones",
                  "Trend", "Combo"]]
     # Kleuraccent voor de %-Z2-cel, per rij vooraf bepaald (index-gekoppeld).
-    css = {idx: z2_kleur(r["pct_in_zone2"], r["z1_s"], r["z2_s"],
-                         r["z3_s"], r["z4_s"], r["z5_s"])
+    css = {idx: ("" if r["is_transport"] else
+                 z2_kleur(r["pct_in_zone2"], r["z1_s"], r["z2_s"],
+                          r["z3_s"], r["z4_s"], r["z5_s"]))
            for idx, r in tabel.iterrows()}
     styler = vis.style.apply(
         lambda col: [css[i] for i in col.index], subset=["% Z2"])
+    # Transport-rijen gedimd: wel zichtbaar in het logboek, duidelijk geen
+    # training.
+    dim = "color: #898781; font-style: italic; opacity: 0.75"
+    styler = styler.apply(
+        lambda row: [dim if tabel.loc[row.name, "is_transport"] else ""] * len(row),
+        axis=1)
     st.dataframe(
         styler,
         column_config={
@@ -644,15 +758,21 @@ with tab_overzicht:
 
     st.subheader("Weektotalen")
     totalen = weekly_totals(acts)
+    # De transport-kolom alleen tonen als er ooit iets te tonen valt.
+    toon_transport = totalen["uren_transport"].sum() > 0
     # Uren als u:mm — '4:18' leest makkelijker dan '4.3 uur'.
     totalen["uren"] = totalen["uren"].map(fmt_hours_hhmm)
     totalen["delta_uren"] = totalen["delta_uren"].map(
         lambda u: fmt_hours_hhmm(u, signed=True))
-    for kolom in ("uren_swimming", "uren_cycling", "uren_running"):
+    for kolom in ("uren_swimming", "uren_cycling", "uren_running",
+                  "uren_transport"):
         totalen[kolom] = totalen[kolom].map(fmt_hours_hhmm)
+    week_kolommen = ["week", "sessies", "uren", "delta_uren", "uren_swimming",
+                     "uren_cycling", "uren_running"]
+    if toon_transport:
+        week_kolommen.append("uren_transport")
     st.dataframe(
-        totalen[["week", "sessies", "uren", "delta_uren", "uren_swimming",
-                 "uren_cycling", "uren_running", "km", "trimp"]],
+        totalen[week_kolommen + ["km", "trimp"]],
         column_config={
             "week": st.column_config.TextColumn("Week"),
             "sessies": st.column_config.NumberColumn("Sessies"),
@@ -662,6 +782,11 @@ with tab_overzicht:
             "uren_swimming": st.column_config.TextColumn("🏊 Zwemmen"),
             "uren_cycling": st.column_config.TextColumn("🚴 Fietsen"),
             "uren_running": st.column_config.TextColumn("🏃 Lopen"),
+            "uren_transport": st.column_config.TextColumn(
+                "🛒 Transport",
+                help="Verplaatsingen (naar het zwembad, boodschappen): tellen "
+                     "mee in het weektotaal en de belasting, niet in trends "
+                     "en trainingsstatistieken."),
             "km": st.column_config.NumberColumn("Km totaal", format="%.0f"),
             "trimp": st.column_config.NumberColumn(
                 "TRIMP", format="%.0f",
@@ -682,7 +807,7 @@ with tab_trends:
     col_run, col_bike = st.columns(2)
     with col_run:
         run_trend = cache_pace_at_hr("running", Z2, DATA_VERSIE)
-        n_runs = (acts["sport"] == "running").sum()
+        n_runs = (trainingen["sport"] == "running").sum()
         if run_trend.empty:
             st.info("Nog geen loopsessies met ≥5 min in zone 2 — dat zegt op zich al iets 😉")
         else:
@@ -718,7 +843,7 @@ with tab_trends:
 
     with col_bike:
         bike_trend = cache_pace_at_hr("cycling", Z2, DATA_VERSIE)
-        n_rides = (acts["sport"] == "cycling").sum()
+        n_rides = (trainingen["sport"] == "cycling").sum()
         if bike_trend.empty:
             st.info("Nog geen fietssessies met ≥5 min in zone 2.")
         else:
@@ -756,7 +881,7 @@ with tab_trends:
         "deel echt hard. Deze balken tonen per week hoe je hartslagtijd verdeeld "
         "was; de stippellijn is het 80%-doel voor het rustige aandeel."
     )
-    intens = weekly_intensity_share(acts)
+    intens = weekly_intensity_share(trainingen)
     if intens.empty:
         st.info("Nog geen sessies met zonetijd.")
     else:
@@ -790,7 +915,7 @@ with tab_trends:
     # afstand en duur (voor zwemmen de zuivere zwemtijd). Zo valt een sessie
     # zonder avg_speed_ms — zoals een samengevoegde zwemsessie — niet meer uit
     # de grafiek.
-    sc = acts.copy()
+    sc = trainingen.copy()
     sc["eff_speed_ms"] = sc.apply(lambda r: effective_speed_ms(r, zwem_actief), axis=1)
     sc = sc.dropna(subset=["eff_speed_ms", "avg_hr"]).copy()
     sc["Datum"] = sc["start_time"].dt.strftime("%d-%m-%Y")
@@ -921,11 +1046,11 @@ with tab_voortgang:
         "efficiëntie wegzakt in de tweede helft van een sessie — onder de 5% bij een "
         "duurtraining duidt op een goede basis."
     )
-    ef = efficiency_factor(acts)
+    ef = efficiency_factor(trainingen)
     # Fietsen met vermogensdata krijgt de zuivere EF (NP per hartslag,
     # windonafhankelijk); de oude snelheid/HR-maat blijft voor ritten zonder
     # power, zodat de historie van vóór de vermogensmeter zichtbaar blijft.
-    pw_voortgang = power_trend(acts)
+    pw_voortgang = power_trend(trainingen)
     power_start_times = set(pw_voortgang["start_time"]) \
         if not pw_voortgang.empty else set()
     c1, c2 = st.columns(2)
@@ -1002,7 +1127,7 @@ with tab_voortgang:
         f"({afst['swim_m'] / 1000:g} km / {afst['bike_m'] / 1000:g} km / "
         f"{afst['run_m'] / 1000:g} km)"
     )
-    pred = race_prediction(conn, acts, race)
+    pred = race_prediction(conn, trainingen, race)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric(f"Zwemmen {afst['swim_m'] / 1000:g} km", fmt_duration(pred["zwem"]))
     c2.metric(f"Fietsen {afst['bike_m'] / 1000:g} km", fmt_duration(pred["fiets"]))
@@ -1016,7 +1141,7 @@ with tab_voortgang:
         "(wetsuit, drafting, spanning) zitten er niet in. De afstanden volgen de eerste race "
         "op de instellingen-tab."
     )
-    for emoji, tekst in readiness(acts, race):
+    for emoji, tekst in readiness(trainingen, race):
         st.markdown(f"{emoji} {tekst}")
 
     hist = cache_prediction_history(race, DATA_VERSIE)
@@ -1058,7 +1183,7 @@ with tab_voortgang:
             st.dataframe(prs, hide_index=True, width="stretch")
     with c2:
         st.subheader("🏊 Zwemprogressie")
-        aandeel, swolf_sessie = swim_progression(conn, acts)
+        aandeel, swolf_sessie = swim_progression(conn, trainingen)
         if aandeel.empty:
             st.info("Nog geen zwemsessies met baandata.")
         else:
@@ -1102,6 +1227,7 @@ with tab_sessie:
         r["activity_key"]: (
             f"{r['start_time']:%d-%m-%Y %H:%M} · {r['Sport']}"
             + (f" · {r['distance_m'] / 1000:.1f} km" if pd.notna(r["distance_m"]) else "")
+            + (" · 🛒 transport" if is_transport(r) else "")
         )
         for _, r in keuze_df.iterrows()
     }
@@ -1208,6 +1334,27 @@ with tab_sessie:
     if nieuw_label != huidig_label:
         set_training_label(conn, gekozen, None if nieuw_label == "(geen)" else nieuw_label)
         st.toast(f"Sessielabel bijgewerkt: {nieuw_label}")
+        st.rerun()
+
+    # Transport-markering (aan/uit): een verplaatsing — naar het zwembad
+    # fietsen, boodschappen — blijft in het logboek en de weektotalen, maar
+    # telt niet mee in trends, records, zone-statistieken, brick-detectie en
+    # de feedback-vergelijking.
+    was_transport = is_transport(sessie)
+    wordt_transport = st.toggle(
+        "🛒 Transport/verplaatsing (geen training)",
+        value=was_transport, key=f"transport_{gekozen}",
+        help="Telt mee in weektotalen en belasting (compleet beeld), maar "
+             "niet in trends, records en de feedback-vergelijking. De sessie "
+             "staat gedimd in de sessielijst.",
+    )
+    if wordt_transport != was_transport:
+        if wordt_transport:
+            mark_transport(conn, MEMORY_DIR, gekozen)
+            st.toast("Gemarkeerd als transport — telt niet meer mee in trends.")
+        else:
+            unmark_transport(conn, MEMORY_DIR, gekozen)
+            st.toast("Transport-markering verwijderd — telt weer mee als training.")
         st.rerun()
 
     # Verwijderen is een soft delete met expliciete bevestiging: één misklik
@@ -1414,7 +1561,7 @@ with tab_sessie:
 
 # ------------------------------------------------------- discipline-tabs --
 with tab_lopen:
-    runs = acts[acts["sport"] == "running"].sort_values("start_time")
+    runs = trainingen[trainingen["sport"] == "running"].sort_values("start_time")
     if runs.empty:
         st.info("Nog geen loopsessies.")
     else:
@@ -1599,7 +1746,7 @@ with tab_lopen:
             pad_single_point(fig, inspanningen["start_time"])
             chart(fig)
 
-        vermogen = run_power(acts)
+        vermogen = run_power(trainingen)
         if not vermogen.empty:
             st.subheader("Loopvermogen per sessie")
             st.caption(
@@ -1622,7 +1769,7 @@ with tab_lopen:
             chart(fig, show_legend=False)
 
 with tab_fietsen:
-    rides = acts[acts["sport"] == "cycling"].sort_values("start_time")
+    rides = trainingen[trainingen["sport"] == "cycling"].sort_values("start_time")
     if rides.empty:
         st.info("Nog geen fietssessies.")
     else:
@@ -1807,7 +1954,7 @@ with tab_fietsen:
                     )
 
 with tab_zwemmen:
-    swim = swim_per_session(conn, acts)
+    swim = swim_per_session(conn, trainingen)
     if swim.empty:
         st.info("Nog geen zwemsessies.")
     else:
@@ -1879,7 +2026,7 @@ with tab_zwemmen:
             "Bij een sessie met wisselende baanlengtes wordt de afstand per baan "
             "geschat via het aantal slagen."
         )
-        matrix = swim_length_matrix(conn, acts)
+        matrix = swim_length_matrix(conn, trainingen)
         if matrix.empty:
             st.info("Nog geen baandata.")
         else:
@@ -1893,7 +2040,7 @@ with tab_zwemmen:
             chart(fig, show_legend=False)
 
         st.subheader("Slagverdeling per sessie")
-        verdeling = stroke_distribution(conn, acts)
+        verdeling = stroke_distribution(conn, trainingen)
         if not verdeling.empty:
             verdeling["Slag"] = verdeling["slag"].map(stroke_label)
             verdeling["pct"] = (verdeling["banen"] / verdeling.groupby("start_time")
@@ -2272,7 +2419,7 @@ with tab_lichaam:
             chart(fig)
 
         # -- Kruising met trainingsdata -------------------------------------
-        kruising = body.weight_vs_cycling(conn, acts)
+        kruising = body.weight_vs_cycling(conn, trainingen)
         if not kruising.empty and len(kruising) > 1:
             st.subheader("Gewicht naast fietsvolume (richting power-to-weight)")
             st.caption(
@@ -2358,7 +2505,7 @@ with tab_coach:
         try:
             with st.spinner("De coach zoekt naar patronen..."):
                 generate_insights(router, conn, MEMORY_DIR,
-                                  progress_text=progress_summary_text(conn, acts))
+                                  progress_text=progress_summary_text(conn, trainingen))
             st.rerun()
         except Exception as e:
             st.error(str(e))

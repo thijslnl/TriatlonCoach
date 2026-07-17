@@ -63,7 +63,9 @@ tricoach/
   zones.py              tijd-in-zones op basis van %LTHR
   storage.py            SQLite (activities, records, lengths)
   weather.py            winddata per sessie via Open-Meteo (gratis, geen key)
-  importer.py           de import-pipeline (parse -> opslaan -> log)
+  importer.py           de import-pipeline (parse -> archief -> opslaan -> log)
+  archive.py            origineel-archief van uploads (uploads/yyyy/mm/, versies)
+  transport.py          transport-markering (ritje naar het zwembad ≠ training)
   trainingslog.py       markdown-entries in memory/trainingslog.md
   analysis.py           weekvolumes, zonetijden, tempo-bij-HR-trends
   schedule.py           aanpasbaar weekschema (memory/weekschema.md)
@@ -80,6 +82,9 @@ memory/                 het leesbare geheugen van de tool (markdown)
   inzichten.md          langetermijnpatronen
   beslissingen.md       architectuurkeuzes en waarom
 data/training.db        SQLite met de ruwe sessie- en seconde-data
+uploads/                onveranderlijk archief van elk geüpload FIT-origineel
+                        (uploads/yyyy/mm/yyyy-mm-dd_HHmm_<activityid>.fit;
+                        heruploads met andere inhoud worden _v2, _v3, ...)
 garmin_import/          plek voor exportzips (test_import.py leest hieruit)
 ```
 

@@ -35,7 +35,7 @@ def section_is_deleted(section: str) -> bool:
 
 # ------------------------------------------------------------- trainingslog --
 
-def _note_in_trainingslog(memory_dir: Path, activity_key: str, note: str) -> None:
+def note_in_trainingslog(memory_dir: Path, activity_key: str, note: str) -> None:
     """Zet een statusregel bij de trainingslog-entry van deze sessie.
 
     De entry wordt herkend aan zijn sleutelregel (``_Sleutel `<key>` ...``);
@@ -127,7 +127,7 @@ def remove_session(conn, memory_dir: Path, activity_key: str,
     if reason and reason.strip():
         note += f": {reason.strip()}"
     note += " — telt niet meer mee in trends, volume en feedback-context"
-    _note_in_trainingslog(memory_dir, activity_key, note)
+    note_in_trainingslog(memory_dir, activity_key, note)
     _mark_feedback(memory_dir, activity_key)
     return True
 
@@ -136,7 +136,7 @@ def restore_session(conn, memory_dir: Path, activity_key: str) -> bool:
     """Herstel een soft-verwijderde sessie en draai de memory-boekhouding terug."""
     if not restore_activity(conn, activity_key):
         return False
-    _note_in_trainingslog(
+    note_in_trainingslog(
         memory_dir, activity_key,
         f"hersteld op {date.today():%d-%m-%Y} — telt weer gewoon mee")
     _unmark_feedback(memory_dir, activity_key)
@@ -151,7 +151,7 @@ def purge_session(conn, memory_dir: Path, activity_key: str) -> bool:
     """
     if not purge_activity(conn, activity_key):
         return False
-    _note_in_trainingslog(
+    note_in_trainingslog(
         memory_dir, activity_key,
         f"definitief gewist op {date.today():%d-%m-%Y} — een herimport van "
         "dezelfde zip voegt deze sessie als nieuw toe")

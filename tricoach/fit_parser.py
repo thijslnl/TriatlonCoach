@@ -70,6 +70,7 @@ class ParsedActivity:
     source_file: str             # bestandsnaam waar dit uit kwam
     devices: list[dict] = field(default_factory=list)  # device_info-berichten
     file_manufacturer: str | None = None  # schrijver van het bestand (file_id)
+    raw_data: bytes | None = None  # de originele FIT-bytes (voor het archief)
 
     @property
     def duration_s(self) -> float:
@@ -203,7 +204,9 @@ def parse_zip(zip_path: Path | str) -> list[ParsedActivity]:
     """Pak een Garmin-exportzip uit en parse alle FIT-bestanden erin.
 
     De zip wordt in het geheugen gelezen; er worden geen bestanden op schijf
-    uitgepakt. Niet-FIT-bestanden worden overgeslagen.
+    uitgepakt. Niet-FIT-bestanden worden overgeslagen. Elke activiteit houdt
+    de originele bytes vast (``raw_data``), zodat de import-pipeline het
+    onaangetaste origineel kan archiveren (zie :mod:`tricoach.archive`).
     """
     activities = []
     with zipfile.ZipFile(zip_path) as zf:
@@ -213,5 +216,6 @@ def parse_zip(zip_path: Path | str) -> list[ParsedActivity]:
             data = zf.read(info)
             activity = parse_fit(io.BytesIO(data), source_name=info.filename)
             if activity is not None:
+                activity.raw_data = data
                 activities.append(activity)
     return activities

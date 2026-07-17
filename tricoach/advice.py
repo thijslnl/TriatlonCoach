@@ -21,7 +21,7 @@ import pandas as pd
 
 from tricoach.llm.router import LLMRouter
 from tricoach.schedule import schedule_as_text
-from tricoach.storage import load_activities
+from tricoach.storage import load_activities, training_activities
 
 SYSTEM = (
     "Je bent een ervaren, nuchtere triatloncoach voor een beginnende triatleet "
@@ -84,15 +84,22 @@ def _recent_log_entries(memory_dir: Path, n: int = MAX_LOG_ENTRIES) -> str:
 
 
 def _week_stats(conn: sqlite3.Connection) -> str:
-    """Volume en zoneverdeling van de afgelopen 7 en 28 dagen, als tekst."""
-    acts = load_activities(conn)
+    """Volume en zoneverdeling van de afgelopen 7 en 28 dagen, als tekst.
+
+    Transport-ritjes (excluded_reason) blijven buiten de trainingscijfers en
+    staan apart vermeld, zodat het advies ze niet als training meeweegt maar
+    het belastingsbeeld wel compleet is.
+    """
+    alle = load_activities(conn)
+    acts = training_activities(alle)
     if acts.empty:
         return "(geen data)"
 
     lines = []
     now = pd.Timestamp.now(tz="UTC")
     for label, days in [("afgelopen 7 dagen", 7), ("afgelopen 28 dagen", 28)]:
-        recent = acts[acts["start_time"] >= now - pd.Timedelta(days=days)]
+        venster = alle[alle["start_time"] >= now - pd.Timedelta(days=days)]
+        recent = training_activities(venster)
         if recent.empty:
             lines.append(f"- {label}: geen trainingen")
             continue
@@ -101,10 +108,15 @@ def _week_stats(conn: sqlite3.Connection) -> str:
         total = recent["duration_s"].sum()
         z2 = recent["z2_s"].sum() / total * 100 if total else 0
         hard = (recent["z4_s"].sum() + recent["z5_s"].sum()) / total * 100 if total else 0
-        lines.append(
+        regel = (
             f"- {label}: {len(recent)} sessies, {total / 3600:.1f}u "
             f"({sports}); {z2:.0f}% in Z2, {hard:.0f}% in Z4+Z5"
         )
+        transport = venster[~venster.index.isin(recent.index)]
+        if not transport.empty:
+            regel += (f" — plus {len(transport)}× transport/verplaatsing "
+                      f"({transport['duration_s'].sum() / 3600:.1f}u, geen training)")
+        lines.append(regel)
     return "\n".join(lines)
 
 

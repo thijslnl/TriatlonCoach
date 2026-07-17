@@ -1,4 +1,4 @@
-"""De import-pipeline: zip -> parsen -> SQLite -> trainingslog.md.
+"""De import-pipeline: zip -> parsen -> archief -> SQLite -> trainingslog.md.
 
 Dit is de ene plek waar een upload doorheen gaat, zowel vanuit het dashboard
 als vanuit de commandline. Deduplicatie gebeurt hier: een activiteit die al
@@ -6,6 +6,10 @@ in de database staat wordt overgeslagen (en komt dus ook niet nogmaals in
 het trainingslog). Een duplicaat is niet helemaal voor niets: ontbrekende
 summary-velden (zoals de loopdynamiek van sessies die vóór die uitbreiding
 zijn geïmporteerd) worden dan alsnog aangevuld uit het FIT-bestand.
+
+Elk aangeleverd FIT-bestand — óók van duplicaten — gaat eerst het
+origineel-archief in (zie :mod:`tricoach.archive`), zodat er altijd een
+onaangetast origineel bewaard blijft voor verificatie en terugrol.
 """
 
 import sqlite3
@@ -13,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from tricoach.archive import archive_and_register
 from tricoach.fit_parser import ParsedActivity, parse_zip
 from tricoach.storage import (
     activity_exists,
@@ -22,6 +27,7 @@ from tricoach.storage import (
     save_activity,
 )
 from tricoach.trainingslog import append_entry
+from tricoach.transport import suggest_transport
 from tricoach.weather import WindData
 from tricoach.zones import time_in_zones, zone_bounds
 
@@ -47,6 +53,12 @@ class ImportResult:
     feedback-stap ze als context kan meewegen. Bij een duplicaat blijven ze
     leeg; ``enriched`` is dan True als de herimport ontbrekende summary-velden
     heeft aangevuld.
+
+    ``transport_suggested`` betekent: dit lijkt een transport-ritje (korte,
+    rustige fietsrit) — de UI hoort dan een bevestigingsvraag te tonen en de
+    coach-feedback uit te stellen tot de gebruiker heeft gekozen.
+    ``archived`` is het relatieve pad van het gearchiveerde origineel (None
+    als archiveren uitstond of de bytes ontbraken).
     """
 
     activity: ParsedActivity
@@ -57,6 +69,8 @@ class ImportResult:
     training_label: str | None = None
     wind: "WindData | None" = None
     enriched: bool = False
+    transport_suggested: bool = False
+    archived: str | None = None
 
 
 def import_zip(
@@ -68,6 +82,7 @@ def import_zip(
     weather_fn: WeatherFn | None = None,
     user_note: str | None = None,
     training_label: str | None = None,
+    uploads_dir: Path | None = None,
 ) -> list[ImportResult]:
     """Importeer alle FIT-activiteiten uit één zip. Geeft per activiteit de status terug.
 
@@ -77,6 +92,11 @@ def import_zip(
     LLM-/API-aanroep afgevangen, zodat een tweede upload geen onnodige calls
     kost — wel worden bij een duplicaat ontbrekende summary-velden aangevuld
     (zo krijgt een herupload van oude zips de loopdynamiek alsnog binnen).
+
+    ``uploads_dir`` is de archiefmap voor de originele FIT-bestanden; met
+    None (bijv. in tests) wordt er niet gearchiveerd. Archiveren gebeurt ook
+    voor duplicaten en verwijderde sessies: elk aangeleverd origineel blijft
+    bewaard, byte-identieke heruploads leveren geen nieuwe versie op.
     """
     bounds = zone_bounds(config["athlete"])
     ftp = config["athlete"].get("ftp") or None
@@ -95,7 +115,9 @@ def import_zip(
             # geïmporteerd: vul de vermogensdata (records + afgeleide
             # kolommen) alsnog aan.
             enriched = enrich_power_records(conn, act, ftp) or enriched
-            results.append(ImportResult(act, status, enriched=enriched))
+            archived = _archive(conn, uploads_dir, act)
+            results.append(ImportResult(act, status, enriched=enriched,
+                                        archived=archived))
             continue
 
         tiz = time_in_zones(act.records, bounds) if not act.records.empty else {}
@@ -104,11 +126,30 @@ def import_zip(
 
         save_activity(conn, act, bounds, user_note=note, wind=wind,
                       training_label=label, ftp=ftp)
+        archived = _archive(conn, uploads_dir, act)
         append_entry(memory_dir, act, tiz, observation, user_note=note,
                      wind=wind, training_label=label)
         results.append(ImportResult(
             act, "nieuw", tiz=tiz, observation=observation, user_note=note,
             training_label=label, wind=wind,
+            transport_suggested=suggest_transport(act, config),
+            archived=archived,
         ))
 
     return results
+
+
+def _archive(conn: sqlite3.Connection, uploads_dir: Path | None,
+             act: ParsedActivity) -> str | None:
+    """Archiveer het origineel van één activiteit; None als dat niet kan.
+
+    Archiveren mag een import nooit laten mislukken: bij een schrijffout
+    blijft de sessie gewoon geïmporteerd, alleen zonder geregistreerd
+    origineel (en dus zichtbaar in de verificatierun).
+    """
+    if uploads_dir is None or act.raw_data is None:
+        return None
+    try:
+        return archive_and_register(conn, uploads_dir, act, act.raw_data).rel_path
+    except OSError:
+        return None
