@@ -19,6 +19,13 @@ raakt de echte data niet aan. Controleert:
 6. demarkeren: alles telt weer gewoon mee.
 """
 
+# De tests staan in tests/; zet de projectroot op sys.path zodat
+# `python tests/test_<naam>.py` het tricoach-package kan importeren.
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+
 import tempfile
 from datetime import datetime
 from pathlib import Path

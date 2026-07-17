@@ -49,8 +49,8 @@ kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
 Testen zonder dashboard kan ook:
 
 ```powershell
-.venv\Scripts\python test_parse.py    # parse de zips in garmin_import/ (alleen lezen)
-.venv\Scripts\python test_import.py   # importeer ze in SQLite + trainingslog
+.venv\Scripts\python tests\test_parse.py    # parse de zips in garmin_import/ (alleen lezen)
+.venv\Scripts\python tests\test_import.py   # importeer ze in SQLite + trainingslog
 ```
 
 ## Projectstructuur
@@ -85,7 +85,12 @@ data/training.db        SQLite met de ruwe sessie- en seconde-data
 uploads/                onveranderlijk archief van elk geüpload FIT-origineel
                         (uploads/yyyy/mm/yyyy-mm-dd_HHmm_<activityid>.fit;
                         heruploads met andere inhoud worden _v2, _v3, ...)
-garmin_import/          plek voor exportzips (test_import.py leest hieruit)
+garmin_import/          plek voor exportzips (tests/test_import.py en de
+                        archief-inhaalslag op de instellingen-tab lezen hieruit)
+tests/                  losse testscripts (python tests/test_<naam>.py, draaien
+                        op tijdelijke data en raken de echte database niet aan;
+                        test_parse/test_import/test_uitbreiding lezen wél
+                        garmin_import/ en verwachten de projectroot als werkmap)
 ```
 
 ## Principes

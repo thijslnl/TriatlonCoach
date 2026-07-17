@@ -14,6 +14,13 @@ grondcontacttijd ~356 ms, verticale ratio 7,9%):
    feedback-context legt uit dat een hogere hartslag verwacht en oké is.
 """
 
+# De tests staan in tests/; zet de projectroot op sys.path zodat
+# `python tests/test_<naam>.py` het tricoach-package kan importeren.
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+
 import json
 import sqlite3
 

@@ -5,6 +5,13 @@ controlesessies uit de opdracht, zodat de berekening te bevestigen is voordat
 het in het dashboard komt.
 """
 
+# De tests staan in tests/; zet de projectroot op sys.path zodat
+# `python tests/test_<naam>.py` het tricoach-package kan importeren.
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+
 import sys
 
 import pandas as pd

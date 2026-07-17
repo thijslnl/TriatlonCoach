@@ -108,7 +108,7 @@ from tricoach.viz import (
 from tricoach.schedule import add_note_row, load_schedule, save_schedule
 from tricoach.settings import save_config
 from tricoach.feedback_context import hr_drift_values, run_splits_df
-from tricoach.archive import migrate_originals, uploads_root
+from tricoach.archive import migrate_originals, uploads_root, verify_originals
 from tricoach.removal import purge_session, remove_session, restore_session
 from tricoach.storage import (
     connect,
@@ -2811,6 +2811,66 @@ with tab_settings:
             },
             hide_index=True, width="stretch", height=420,
         )
+
+    st.divider()
+    st.subheader("📦 Origineel-archief")
+    # Stand van het archief: hoeveel sessies hebben een bewaard origineel?
+    # De inhaalslag draait ook automatisch bij elke serverstart; de knop is
+    # er zodat je na het klaarzetten van oude zips niet hoeft te herstarten.
+    met_origineel = conn.execute(
+        "SELECT COUNT(*) FROM activities "
+        "WHERE deleted_at IS NULL AND archived_path IS NOT NULL").fetchone()[0]
+    zonder_origineel = conn.execute(
+        "SELECT COUNT(*) FROM activities "
+        "WHERE deleted_at IS NULL AND archived_path IS NULL").fetchone()[0]
+    a1, a2 = st.columns(2)
+    a1.metric("Met bewaard origineel", met_origineel,
+              help=f"Het originele FIT-bestand staat in {UPLOADS_DIR.name}/ "
+                   "en is herbruikbaar voor verificatie en terugrol.")
+    a2.metric("Zonder origineel", zonder_origineel,
+              help="Geïmporteerd vóór het archief bestond. Zet de oude "
+                   "exportzips in garmin_import/ en klik op zoeken, dan "
+                   "worden ze alsnog gearchiveerd.")
+    import_map = resolve_path(config, "import_dir")
+    col_zoek, col_verif = st.columns(2)
+    with col_zoek:
+        if st.button(f"🔎 Zoek originelen in {import_map.name}/",
+                     width="stretch",
+                     help="Doorzoekt de map op zips en losse FIT-bestanden, "
+                          "archiveert alles wat bij een bekende sessie hoort "
+                          "en haalt de 'origineel ontbreekt'-markering weg. "
+                          "Byte-identieke bestanden worden nooit dubbel "
+                          "opgeslagen; draaien kan dus altijd."):
+            with st.spinner("Zoeken en archiveren..."):
+                n = migrate_originals(conn, UPLOADS_DIR, [import_map])
+            if n:
+                st.toast(f"{n} origineel(en) gearchiveerd in {UPLOADS_DIR.name}/.")
+            elif not import_map.exists():
+                st.toast(f"Map {import_map.name}/ bestaat (nog) niet — maak "
+                         "hem aan en zet de zips erin.", icon="ℹ️")
+            else:
+                st.toast("Geen (nieuwe) originelen gevonden die bij een "
+                         "bekende sessie horen.", icon="ℹ️")
+            st.rerun()
+    with col_verif:
+        if st.button("✅ Verificatierun archief ↔ database", width="stretch",
+                     help="Parset elk bewaard origineel opnieuw en vergelijkt "
+                          "sleutel, sport, duur, afstand en hartslag met de "
+                          "database. Sessies zonder origineel worden "
+                          "overgeslagen."):
+            with st.spinner("Originelen opnieuw parsen..."):
+                st.session_state["verificatie_uitkomst"] = verify_originals(conn)
+    uitkomst = st.session_state.get("verificatie_uitkomst")
+    if uitkomst is not None:
+        telling = uitkomst["status"].value_counts().to_dict()
+        st.write("Uitkomst: " + " · ".join(
+            f"**{v}× {k}**" for k, v in telling.items()))
+        problemen = uitkomst[uitkomst["status"].isin(["afwijking", "bestand_weg"])]
+        if problemen.empty:
+            st.caption("Geen afwijkingen: elk bewaard origineel levert bij "
+                       "herparse dezelfde kernwaarden op als de database.")
+        else:
+            st.dataframe(problemen, hide_index=True, width="stretch")
 
     st.divider()
     # Onopvallend beheer van soft-verwijderde sessies: tonen, herstellen of
