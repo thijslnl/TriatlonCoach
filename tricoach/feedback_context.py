@@ -46,6 +46,7 @@ from tricoach.formatting import (
     local_time,
     sport_label,
 )
+from tricoach.memory_review import freshness_warnings
 from tricoach.removal import section_is_deleted
 from tricoach.rundynamics import dynamics_block
 from tricoach.schedule import schedule_as_text
@@ -272,7 +273,8 @@ def _swim_detail(lengths: pd.DataFrame, pool_length: float | None,
 
     if distance_m:
         speed = derive_speed_ms(distance_m, t.sum())
-        regels.append(f"- Tempo op zuivere zwemtijd: {fmt_pace_per_100m(speed)}")
+        regels.append(f"- Actief tempo (zuivere zwemtijd, excl. rust): "
+                      f"{fmt_pace_per_100m(speed)}")
     regels.append(
         f"- Tijd per baan: gem. {t.mean():.0f}s, snelste {t.min():.0f}s, "
         f"langzaamste {t.max():.0f}s"
@@ -412,14 +414,16 @@ def _prev_activities(conn: sqlite3.Connection, act: ParsedActivity) -> pd.DataFr
 
 
 def _row_line(row: pd.Series, sport: str) -> str:
-    """Eén eerdere sessie als vergelijkbare tekstregel."""
+    """Eén eerdere sessie als vergelijkbare tekstregel (tempo op actieve tijd)."""
     datum = _local(row["start_time"]).strftime("%d-%m-%Y")
     delen = [f"duur {fmt_duration(row['duration_s'])}"]
-    speed = derive_speed_ms(row["distance_m"], row["duration_s"])
+    actief = row.get("active_s")
+    tijd = actief if actief and not pd.isna(actief) else row["duration_s"]
+    speed = derive_speed_ms(row["distance_m"], tijd)
     if sport == "running":
-        delen.append(f"{row['distance_m'] / 1000:.2f} km op {fmt_pace_per_km(speed)}")
+        delen.append(f"{row['distance_m'] / 1000:.2f} km op {fmt_pace_per_km(speed)} (actief)")
     else:
-        delen.append(f"{row['distance_m'] / 1000:.1f} km, {fmt_speed_kmh(speed)}")
+        delen.append(f"{row['distance_m'] / 1000:.1f} km, {fmt_speed_kmh(speed)} (actief)")
         if row.get("total_ascent") and not pd.isna(row["total_ascent"]):
             delen.append(f"{row['total_ascent']:.0f} hm")
         # Vermogen als de sessie het heeft (sinds juli 2026): NP + EF + bron,
@@ -449,15 +453,16 @@ def _row_line(row: pd.Series, sport: str) -> str:
 
 
 def _swim_row_line(conn: sqlite3.Connection, row: pd.Series) -> str:
-    """Eén eerdere zwemsessie: afstand, tempo per 100 m, slagritme, SWOLF."""
+    """Eén eerdere zwemsessie: afstand, actief tempo per 100 m, slagritme, SWOLF."""
     datum = _local(row["start_time"]).strftime("%d-%m-%Y")
-    delen = [f"{row['distance_m']:.0f} m in {fmt_duration(row['duration_s'])}"]
+    delen = [f"{row['distance_m']:.0f} m, sessieduur {fmt_duration(row['duration_s'])}"]
 
     lengths = load_lengths(conn, row["activity_key"])
     if not lengths.empty:
         t = lengths["total_timer_time"].astype(float)
+        delen.append(f"actieve zwemtijd {fmt_duration(t.sum())}")
         speed = derive_speed_ms(row["distance_m"], t.sum())
-        delen.append(f"tempo {fmt_pace_per_100m(speed)} (zuivere zwemtijd)")
+        delen.append(f"actief tempo {fmt_pace_per_100m(speed)} (excl. rust aan de kant)")
         s = lengths["total_strokes"].dropna().astype(float)
         if not s.empty:
             delen.append(
@@ -758,6 +763,15 @@ def build_feedback_context(
             + noten
         )
     blocks.append("# Atletenprofiel\n\n" + profile_block(memory_dir, config))
+    # Versheidscheck: verouderde of aantoonbaar achterhaalde profielcontext
+    # gaat expliciet gemarkeerd mee, zodat de coach hem niet klakkeloos
+    # overneemt (zie tricoach.memory_review).
+    vers = freshness_warnings(memory_dir, conn, load_activities(conn))
+    if vers:
+        blocks.append(
+            "# Let op: mogelijk verouderde profielcontext\n\n"
+            + "\n".join(f"- {w}" for w in vers)
+        )
     blocks.append(
         "# Weekschema (voor de bedoeling van de sessie en de volgende training)\n\n"
         + schedule_as_text(memory_dir)

@@ -22,13 +22,13 @@ races:
   distances: 1,5km zwemmen / 40km fietsen / 10km lopen
   goal: Goed finishen (eerste race)
   target_time: ''
-- name: Ironman 70.3
+- name: IRONMAN 70.3 Luxembourg (Remich)
   date: 2027-06-01
   swim_m: 1900
   bike_m: 90000
   run_m: 21100
   distances: 1,9km zwemmen / 90km fietsen / 21,1km lopen
-  goal: Goed finishen
+  goal: Goed finishen (primaire doelrace)
   target_time: ''
 combo:
   max_gap_min: 25

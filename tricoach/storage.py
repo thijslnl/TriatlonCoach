@@ -34,6 +34,7 @@ from tricoach.power import (
     power_source,
     time_in_power_zones,
 )
+from tricoach.timebasis import active_seconds
 from tricoach.zones import ZONE_NAMES, pct_in_zone2, time_in_zones
 
 SCHEMA = """
@@ -147,6 +148,11 @@ _ADDED_COLUMNS = {
     # is en herrekend via recompute_power_zones zodra hij wijzigt.
     "p1_s": "INTEGER", "p2_s": "INTEGER", "p3_s": "INTEGER",
     "p4_s": "INTEGER", "p5_s": "INTEGER", "p6_s": "INTEGER",
+    # Actieve/bewegende tijd (zie tricoach.timebasis): de ene tijdsbasis voor
+    # tempo, snelheid en EF. Bestaande sessies worden bij het toevoegen van
+    # de kolom eenmalig herrekend (zie _migrate/recompute_active_time), zodat
+    # trends niet halverwege van definitie wisselen.
+    "active_s": "REAL",
 }
 
 
@@ -165,6 +171,44 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Vermogen per meetpunt (sinds de vermogensmeters); oude rijen NULL.
         conn.execute("ALTER TABLE records ADD COLUMN power REAL")
     conn.commit()
+    # Eenmalige datamigratie: sessies van vóór de actieve-tijd-definitie
+    # (active_s nog NULL) worden herrekend, zodat álle sessies dezelfde
+    # tijdsbasis hebben. Idempotent: daarna is er niets meer te doen.
+    if have and "active_s" not in have:
+        recompute_active_time(conn)
+
+
+def recompute_active_time(conn: sqlite3.Connection) -> int:
+    """Herbereken de actieve tijd (en afgeleiden) van sessies zonder ``active_s``.
+
+    Per sessie wordt de actieve tijd bepaald volgens
+    :func:`tricoach.timebasis.active_seconds` en worden ``avg_speed_ms``
+    (afstand / actieve tijd) en ``aerobic_efficiency`` daarop herrekend —
+    de definitie waarmee ook nieuwe imports worden opgeslagen. Soft-verwijderde
+    sessies doen mee, zodat een herstelde sessie dezelfde basis heeft.
+    Geeft het aantal bijgewerkte sessies terug.
+    """
+    rows = conn.execute(
+        "SELECT activity_key, sport, duration_s, distance_m, avg_hr "
+        "FROM activities WHERE active_s IS NULL").fetchall()
+    n = 0
+    for key, sport, duration_s, distance_m, avg_hr in rows:
+        records = load_records(conn, key) if sport == "cycling" else None
+        lengths = load_lengths(conn, key) if sport == "swimming" else None
+        actief = active_seconds(sport, duration_s, records, lengths)
+        if actief is None:
+            continue
+        speed = (distance_m / actief) if distance_m and actief > 0 else None
+        eff = aerobic_efficiency(sport, speed, avg_hr)
+        conn.execute(
+            "UPDATE activities SET active_s = ?, "
+            "avg_speed_ms = COALESCE(?, avg_speed_ms), "
+            "aerobic_efficiency = COALESCE(?, aerobic_efficiency) "
+            "WHERE activity_key = ?",
+            (actief, speed, eff, key))
+        n += 1
+    conn.commit()
+    return n
 
 
 def aerobic_efficiency(sport: str, avg_speed_ms: float | None,
@@ -275,7 +319,14 @@ def save_activity(
         if not act.records.empty and "heart_rate" in act.records
         else dict.fromkeys(ZONE_NAMES, 0)
     )
-    avg_speed = s.get("enhanced_avg_speed") or s.get("avg_speed")
+    # Tempo/snelheid op actieve tijd (zie tricoach.timebasis): rust aan de
+    # kant en stilstand tellen niet mee. Terugval op het Garmin-veld als de
+    # afstand of actieve tijd ontbreekt.
+    actief_s = active_seconds(act.sport, s.get("total_timer_time"),
+                              act.records, act.lengths)
+    avg_speed = (s.get("total_distance") / actief_s
+                 if s.get("total_distance") and actief_s
+                 else s.get("enhanced_avg_speed") or s.get("avg_speed"))
     avg_hr = s.get("avg_heart_rate")
     # Vooraf berekend en gecachet, zodat de tabel niet bij elke render alle
     # FIT-records opnieuw hoeft te parsen.
@@ -295,9 +346,10 @@ def save_activity(
                p1_s, p2_s, p3_s, p4_s, p5_s, p6_s,
                user_note, training_label,
                wind_speed, wind_direction, wind_gusts, temperature_c,
+               active_s,
                summary_json, source_file, imported_at
            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             act.activity_key, act.sport, act.sub_sport, act.start_time.isoformat(),
             s.get("total_timer_time"), s.get("total_distance"),
@@ -321,6 +373,7 @@ def save_activity(
             wind.direction_deg if wind else None,
             wind.gusts_kmh if wind else None,
             wind.temperature_c if wind else None,
+            actief_s,
             json.dumps(s, default=str), act.source_file,
             datetime.now().isoformat(timespec="seconds"),
         ),

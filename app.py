@@ -57,6 +57,7 @@ from tricoach.formatting import (
     sport_label,
     stroke_label,
 )
+from tricoach.memory_review import MAX_LEEFTIJD_WEKEN, review_dataframe
 from tricoach.progress import (
     acwr_status,
     best_efforts,
@@ -535,13 +536,13 @@ with tab_overzicht:
     tabel = acts.head(15).copy()
     tabel["Duur"] = pd.to_datetime(tabel["duration_s"], unit="s").dt.time
     tabel["Afstand"] = tabel["distance_m"] / 1000
-    # Tempo/snelheid uit afstand en duur (altijd aanwezig), niet uit het soms
-    # ontbrekende avg_speed_ms. Voor zwemmen telt de zuivere zwemtijd (som van
-    # de actieve banen) als noemer; rust aan de kant valt zo weg. Elke cel is
-    # afgeschermd zodat één rij met een gat in de data de tabel niet laat crashen.
+    # Tempo/snelheid op de actieve tijd (zie tricoach.timebasis): rust aan de
+    # kant en stilstand tellen niet mee; terugval op de timer-duur als de
+    # actieve tijd ontbreekt. Elke cel is afgeschermd zodat één rij met een
+    # gat in de data de tabel niet laat crashen.
     tabel["Tempo / snelheid"] = tabel.apply(
         lambda r: veilig_cel(sessie_tempo, r["sport"], r["distance_m"],
-                             r["duration_s"], zwem_actief.get(r["activity_key"])),
+                             r["duration_s"], r.get("active_s")),
         axis=1)
     # Vermogen en cadans, alleen zinvol bij fietssessies met powerdata (sinds
     # de Rally/Kickr); alle andere rijen tonen een streepje.
@@ -596,6 +597,11 @@ with tab_overzicht:
             "start_time": st.column_config.DatetimeColumn("Datum", format="DD-MM-YYYY HH:mm"),
             "Duur": st.column_config.TimeColumn("Duur", format="H:mm:ss"),
             "Afstand": st.column_config.NumberColumn("Afstand", format="%.2f km"),
+            "Tempo / snelheid": st.column_config.TextColumn(
+                "Actief tempo / snelheid",
+                help="Op actieve/bewegende tijd: rust aan de badrand, "
+                     "stilstand en pauzes tellen niet mee. Kan daardoor "
+                     "sneller zijn dan de weergave in Garmin Connect."),
             "avg_hr": st.column_config.NumberColumn("Gem. HR"),
             "Vermogen": st.column_config.TextColumn(
                 "Vermogen",
@@ -807,10 +813,11 @@ with tab_trends:
             deel = deel.copy()
             if soort == "tempo":
                 deel["y"] = pace_as_time(afstand / deel["eff_speed_ms"])
-                y_label = "Tempo (min/km)" if sport_key == "running" else "Tempo (min/100m)"
+                y_label = ("Actief tempo (min/km)" if sport_key == "running"
+                           else "Actief tempo (min/100m)")
             else:
                 deel["y"] = deel["eff_speed_ms"] * 3.6
-                y_label = "Snelheid (km/h)"
+                y_label = "Snelheid (km/h, actief)"
             fig = px.scatter(
                 deel, x="avg_hr", y="y", size="duration_s", custom_data=["Datum"],
                 color_discrete_sequence=[SPORT_COLORS[titel]],
@@ -1112,9 +1119,11 @@ with tab_sessie:
     c1.metric("Duur", fmt_duration(sessie["duration_s"]))
     c2.metric("Afstand", f"{sessie['distance_m'] / 1000:.2f} km"
               if pd.notna(sessie["distance_m"]) else GEEN_WAARDE)
-    c3.metric("Tempo / snelheid", veilig_cel(
+    c3.metric("Actief tempo", veilig_cel(
         sessie_tempo, sessie["sport"], sessie["distance_m"],
-        sessie["duration_s"], zwem_actief.get(gekozen)))
+        sessie["duration_s"], sessie.get("active_s")),
+        help="Op actieve/bewegende tijd (excl. rust en stilstand); "
+             "kan afwijken van Garmin Connect.")
     c4.metric("Gem. / max HR",
               f"{sessie['avg_hr']:.0f} / {sessie['max_hr']:.0f}"
               if pd.notna(sessie["avg_hr"]) and pd.notna(sessie["max_hr"]) else GEEN_WAARDE)
@@ -1420,7 +1429,7 @@ with tab_lopen:
             fig = px.scatter(
                 runs, x="start_time", y="tempo", color="avg_hr",
                 color_continuous_scale=PAL["seq"],
-                labels={"start_time": "Datum", "tempo": "Tempo (min/km)",
+                labels={"start_time": "Datum", "tempo": "Actief tempo (min/km)",
                         "avg_hr": "Gem. HR"},
             )
             pace_axis(fig)
@@ -1430,7 +1439,8 @@ with tab_lopen:
                 line=dict(color=with_alpha(PAL["muted"], 0.4)),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km · HR %{marker.color}<extra></extra>",
             )
-            fig.update_layout(title="Tempo per sessie (kleur = gemiddelde hartslag)")
+            fig.update_layout(
+                title="Actief tempo per sessie (kleur = gemiddelde hartslag)")
             chart(fig, show_legend=False)
         with c2:
             cad = dynamiek.dropna(subset=["cadans_spm"])
@@ -1623,7 +1633,7 @@ with tab_fietsen:
             fig = px.scatter(
                 rides, x="start_time", y="snelheid_kmh", color="avg_hr",
                 color_continuous_scale=PAL["seq"],
-                labels={"start_time": "Datum", "snelheid_kmh": "Snelheid (km/h)",
+                labels={"start_time": "Datum", "snelheid_kmh": "Snelheid (km/h, actief)",
                         "avg_hr": "Gem. HR"},
             )
             fig.update_traces(
@@ -1632,7 +1642,8 @@ with tab_fietsen:
                 line=dict(color=with_alpha(PAL["muted"], 0.4)),
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h · HR %{marker.color}<extra></extra>",
             )
-            fig.update_layout(title="Snelheid per rit (kleur = gemiddelde hartslag)")
+            fig.update_layout(
+                title="Snelheid per rit — op rijtijd (kleur = gemiddelde hartslag)")
             chart(fig, show_legend=False)
         with c2:
             fig = px.bar(
@@ -1841,7 +1852,7 @@ with tab_zwemmen:
             swim["tempo"] = pace_as_time(swim["tempo_s_per_100m"])
             fig = px.line(
                 swim, x="start_time", y="tempo", markers=True,
-                labels={"start_time": "Datum", "tempo": "Tempo (min/100m)"},
+                labels={"start_time": "Datum", "tempo": "Actief tempo (min/100m)"},
             )
             pace_axis(fig)
             fig.update_traces(
@@ -1856,7 +1867,8 @@ with tab_zwemmen:
                     y=[css_y, css_y], mode="lines", name="CSS",
                     line=dict(color=PAL["ref_line"], dash="dash", width=2),
                     hoverinfo="skip")
-            fig.update_layout(title="Tempo per 100 meter (sneller = hoger)")
+            fig.update_layout(
+                title="Actief tempo per 100 meter — excl. rust (sneller = hoger)")
             chart(fig, show_legend=css is not None)
 
         st.subheader("Tempo per baan")
@@ -1940,7 +1952,7 @@ with tab_bricks:
                 f"**{SPORT_ICOON[m['sport']]} {naam}**  \n"
                 f"{(m['distance_m'] or 0) / 1000:.2f} km · "
                 f"{fmt_duration(m['duration_s'])}  \n"
-                f"{veilig_cel(sessie_tempo, m['sport'], m['distance_m'], m['duration_s'], zwem_actief.get(m['activity_key']))}"
+                f"{veilig_cel(sessie_tempo, m['sport'], m['distance_m'], m['duration_s'], m.get('active_s'))}"
                 f" · {hr}")
             if i < len(members) - 1:
                 t = combo["transitions"][i]
@@ -2616,6 +2628,41 @@ with tab_settings:
             "Ollama is lokaal en gratis. Anthropic-kosten worden per model berekend "
             "(prijzen per miljoen tokens onder `anthropic.model_prices` in config.yaml; "
             "onbekende modellen vallen terug op de standaardprijs). Bron: memory/llm_log.md."
+        )
+
+    st.divider()
+    st.subheader("🧹 Memory-review — doelen.md")
+    st.caption(
+        "De volledige inhoud van memory/doelen.md gaat mee in élke feedback- en "
+        "adviesprompt. Loop deze tabel periodiek (bijv. maandelijks) na en werk "
+        "verouderde regels bij in het bestand zelf; wijzigingen worden "
+        "automatisch gedetecteerd en in de changelog van doelen.md gelogd. "
+        f"Regels ouder dan {MAX_LEEFTIJD_WEKEN} weken zijn gemarkeerd."
+    )
+    review = review_dataframe(MEMORY_DIR)
+    if review.empty:
+        st.info("Geen doelen.md gevonden.")
+    else:
+        oud = review["Weken oud"] >= MAX_LEEFTIJD_WEKEN
+        if oud.any():
+            st.warning(
+                f"{int(oud.sum())} regel(s) zijn {MAX_LEEFTIJD_WEKEN} weken of "
+                "ouder — controleer of ze nog kloppen."
+            )
+        styler = review.style.apply(
+            lambda _kol: ["background-color: rgba(255, 165, 0, 0.15)" if v else ""
+                          for v in oud], subset=["Regel"])
+        st.dataframe(
+            styler,
+            column_config={
+                "Regel": st.column_config.TextColumn("Regel", width="large"),
+                "Laatst gewijzigd": st.column_config.DateColumn(
+                    "Laatst gewijzigd", format="DD-MM-YYYY",
+                    help="Datum waarop deze regel voor het laatst is gewijzigd "
+                         "(of waarop de wijziging voor het eerst is gezien)."),
+                "Weken oud": st.column_config.NumberColumn("Weken oud"),
+            },
+            hide_index=True, width="stretch", height=420,
         )
 
     st.divider()

@@ -114,37 +114,44 @@ def fmt_speed_kmh(speed_ms: float | None) -> str:
 
 def sessie_tempo(sport: str, distance_m: float | None,
                  duration_s: float | None,
-                 active_swim_s: float | None = None) -> str:
-    """Tempo/snelheid-cel voor de sessietabel, afgeleid uit afstand en duur.
+                 active_s: float | None = None) -> str:
+    """Actief-tempo/snelheid-cel voor de sessietabel, uit afstand en tijd.
 
     Per sport: looptempo (M:SS/km) voor hardlopen, snelheid (km/h) voor
-    fietsen en zwemtempo (M:SS/100m) voor de rest. Voor zwemmen wordt bij
-    voorkeur de zuivere zwemtijd (``active_swim_s``, de som van de actieve
-    banen) als noemer gebruikt; die telt de rust aan de kant niet mee en geeft
-    daardoor hetzelfde tempo als Garmins eigen gemiddelde. Ontbreekt die, dan
-    valt het terug op ``duration_s`` (de totale timer-duur).
+    fietsen en zwemtempo (M:SS/100m) voor de rest. Als noemer geldt de
+    actieve tijd (``active_s``, zie :mod:`tricoach.timebasis`): rust aan de
+    kant en stilstand tellen niet mee. Ontbreekt die, dan valt het terug op
+    ``duration_s`` (de totale timer-duur).
 
-    Leunt bewust niet op ``avg_speed_ms``: dat veld ontbreekt op sommige
-    sessies (zoals een samengevoegde zwemsessie), terwijl afstand en duur er
-    altijd zijn. Bij een ontbrekende of ongeldige waarde volgt een placeholder.
+    Leunt bewust niet op ``avg_speed_ms``: dat veld ontbrak op sommige oude
+    sessies, terwijl afstand en duur er altijd zijn. Bij een ontbrekende of
+    ongeldige waarde volgt een placeholder.
     """
+    tijd = duration_s if _ongeldig(active_s) else active_s
+    speed = derive_speed_ms(distance_m, tijd)
     if sport == "running":
-        return fmt_pace_per_km(derive_speed_ms(distance_m, duration_s))
+        return fmt_pace_per_km(speed)
     if sport == "cycling":
-        return fmt_speed_kmh(derive_speed_ms(distance_m, duration_s))
-    zwemtijd = duration_s if _ongeldig(active_swim_s) else active_swim_s
-    return fmt_pace_per_100m(derive_speed_ms(distance_m, zwemtijd))
+        return fmt_speed_kmh(speed)
+    return fmt_pace_per_100m(speed)
 
 
 def effective_speed_ms(row, active_swim_s: dict | None = None) -> float | None:
     """Effectieve snelheid (m/s) van een sessie(-rij uit de activiteitentabel).
 
-    Gebruikt ``avg_speed_ms`` waar aanwezig en valt anders terug op afstand en
-    duur — voor zwemmen bij voorkeur de zuivere zwemtijd uit ``active_swim_s``
-    (dict activity_key -> seconden), zodat rust aan de kant niet meetelt. Zo
-    valt een sessie zonder ``avg_speed_ms`` (zoals een samengevoegde
-    zwemsessie) niet uit de grafieken.
+    Rekent op de actieve tijd waar die bekend is (de ``active_s``-kolom, zie
+    :mod:`tricoach.timebasis`), daarna ``avg_speed_ms`` (sinds de
+    actieve-tijd-migratie eveneens actief-gebaseerd) en als laatste afstand
+    en duur — voor zwemmen bij voorkeur de zuivere zwemtijd uit
+    ``active_swim_s`` (dict activity_key -> seconden). Zo valt een sessie
+    zonder ``avg_speed_ms`` (zoals een samengevoegde zwemsessie) niet uit de
+    grafieken.
     """
+    actief = row.get("active_s") if hasattr(row, "get") else None
+    if not _ongeldig(actief):
+        speed = derive_speed_ms(row["distance_m"], actief)
+        if speed is not None:
+            return speed
     if not _ongeldig(row["avg_speed_ms"]):
         return float(row["avg_speed_ms"])
     tijd = None
