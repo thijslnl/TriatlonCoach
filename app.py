@@ -1104,18 +1104,24 @@ with tab_voortgang:
     if not dec.empty:
         dec = dec.copy().sort_values("start_time")
         dec["Sport"] = dec["sport"].map(sport_label)
+        dec["label"] = dec["start_time"].dt.strftime("%d-%m")
         fig = px.bar(
-            dec, x="start_time", y="decoupling_pct", color="Sport",
+            dec, x="label", y="decoupling_pct", color="Sport",
             color_discrete_map=SPORT_COLORS, barmode="group",
-            labels={"start_time": "Datum", "decoupling_pct": "Decoupling (%)"},
+            labels={"label": "Datum", "decoupling_pct": "Decoupling (%)"},
+            category_orders={"label": dec["label"].tolist()},
         )
-        date_xaxis(fig, dec["start_time"])
+        # Forceer een categorie-as: op een datum-as maakt Plotly elke staaf maar
+        # één dag breed over een reeks van weken, waardoor de balken tot
+        # onzichtbare haarlijntjes verschrompelen. Als categorie blijven ze
+        # gewoon dag-maand en chronologisch.
+        fig.update_xaxes(type="category")
         fig.add_hline(y=5, line_dash="dash", line_color=PAL["ref_line"],
                       annotation_text="richtwaarde 5%",
                       annotation_font_color=PAL["muted"])
         fig.update_traces(
             marker_line=dict(width=1, color=PAL["surface"]),
-            hovertemplate="%{x|%d-%m-%Y} · %{fullData.name}: %{y:.1f}%<extra></extra>")
+            hovertemplate="%{x} · %{fullData.name}: %{y:.1f}%<extra></extra>")
         fig.update_layout(title="HR-decoupling per sessie (lager = betere aerobe basis)")
         chart(fig)
 
@@ -1924,27 +1930,31 @@ with tab_fietsen:
             with f2:
                 pw_dec = cache_power_decoupling(DATA_VERSIE)
                 if not pw_dec.empty:
-                    pw_dec = pw_dec.copy()
+                    pw_dec = pw_dec.copy().sort_values("start_time")
                     pw_dec["Waar"] = pw_dec["indoor"].map(
                         {True: "Indoor (trainer)", False: "Buiten"})
+                    pw_dec["label"] = pw_dec["start_time"].dt.strftime("%d-%m")
                     fig = px.bar(
-                        pw_dec, x="start_time", y="decoupling_pct", color="Waar",
+                        pw_dec, x="label", y="decoupling_pct", color="Waar",
                         barmode="group",
                         color_discrete_map={"Buiten": SPORT_COLORS["Fietsen"],
                                             "Indoor (trainer)": PAL["cats"][5]},
-                        labels={"start_time": "Datum",
+                        labels={"label": "Datum",
                                 "decoupling_pct": "Pw:Hr decoupling (%)",
                                 "Waar": ""},
+                        category_orders={"label": pw_dec["label"].tolist()},
                     )
+                    # Categorie-as: op een datum-as verschrompelen staven over
+                    # weken tot onzichtbare haarlijntjes (zie HR-decoupling).
+                    fig.update_xaxes(type="category")
                     fig.add_hline(y=5, line_dash="dash", line_color=PAL["ref_line"],
                                   annotation_text="richtwaarde 5%",
                                   annotation_font_color=PAL["muted"])
                     fig.update_traces(
                         marker_line=dict(width=1, color=PAL["surface"]),
-                        hovertemplate="%{x|%d-%m-%Y} · %{y:.1f}%<extra></extra>")
+                        hovertemplate="%{x} · %{y:.1f}%<extra></extra>")
                     fig.update_layout(
                         title="Aerobic decoupling (Pw:Hr) — lager = betere basis")
-                    date_xaxis(fig, pw_dec["start_time"])
                     chart(fig)
                     st.caption(
                         "Vermogen/hartslag van de eerste vs de tweede helft "
