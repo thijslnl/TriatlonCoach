@@ -2248,17 +2248,22 @@ with tab_bricks:
                 date_xaxis(fig, wissels["start_time"])
                 chart(fig)
         with c2:
-            delta = historie.dropna(subset=["delta_tempo_s_per_km"])
+            delta = historie.dropna(subset=["delta_tempo_s_per_km"]).copy()
             if not delta.empty:
+                # De +/- vooraf in Python opmaken: Plotly's hover-format snapt de
+                # d3-tekenvlag (%{y:+.0f}) niet en toont dan de rauwe float met
+                # alle decimalen. Via customdata houden we het teken én ronden af.
+                delta["delta_txt"] = delta["delta_tempo_s_per_km"].map(
+                    lambda v: f"{v:+.0f}")
                 fig = px.line(
                     delta, x="start_time", y="delta_tempo_s_per_km", markers=True,
-                    custom_data=["delta_hr"],
+                    custom_data=["delta_txt"],
                     labels={"start_time": "Datum",
                             "delta_tempo_s_per_km": "Eerste stuk t.o.v. rest (s/km)"},
                 )
                 fig.update_traces(
                     marker=dict(size=11), line=dict(color=SPORT_COLORS["Hardlopen"]),
-                    hovertemplate="%{x|%d-%m-%Y} · eerste stuk %{y:+.0f} s/km "
+                    hovertemplate="%{x|%d-%m-%Y} · eerste stuk %{customdata[0]} s/km "
                                   "t.o.v. de rest<extra></extra>")
                 fig.add_hline(y=0, line_dash="dash", line_color=PAL["ref_line"])
                 fig.update_layout(
