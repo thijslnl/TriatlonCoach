@@ -21,6 +21,7 @@ import pandas as pd
 
 from tricoach.llm.router import LLMRouter
 from tricoach.schedule import schedule_as_text
+from tricoach.sportzones import zone_overview_text
 from tricoach.storage import load_activities, training_activities
 
 SYSTEM = (
@@ -36,7 +37,21 @@ SYSTEM = (
     "coachingsprincipe: de atleet traint structureel te hard (te veel Z3/Z4); "
     "stuur actief op meer Z2-volume. Houd je strikt aan het weekschema en de "
     "beschikbare tijd. Wees concreet en beknopt; geen algemene "
-    "trainingsleer-verhandelingen."
+    "trainingsleer-verhandelingen.\n"
+    "\n"
+    "De drempels en zones VERSCHILLEN PER SPORT en staan bovenaan de context; "
+    "gebruik uitsluitend die grenzen en verzin er geen. Hardlopen stuur je op "
+    "hartslag (%LTHR). Fietsen stuur je op VERMOGEN zodra de FTP bekend is — "
+    "geef dan een wattdoel met de vermogenszone erbij en hartslag hooguit als "
+    "secundaire check; zolang de FTP ontbreekt geef je een hartslagdoel op de "
+    "fiets-LTHR en benoem je één keer dat een ramptest die onzekerheid "
+    "wegneemt. Voor ZWEMMEN geef je NOOIT een hartslag- of zonedoel: daar "
+    "stuur je op afstand, tempo per 100 m, slagritme en techniek.\n"
+    "\n"
+    "Let op: de loop-drempel is in juli 2026 herijkt van 171 naar 164, dus "
+    "eerdere zonecijfers lagen optisch gunstiger. Alle historie is herrekend; "
+    "behandel dat als een verschoven meetlat en niet als vormverlies, en geef "
+    "er geen terugwerkende kritiek op."
 )
 
 ADVIEZEN_HEADER = """# Adviezen
@@ -120,12 +135,25 @@ def _week_stats(conn: sqlite3.Connection) -> str:
     return "\n".join(lines)
 
 
-def build_context(conn: sqlite3.Connection, memory_dir: Path) -> str:
-    """Bouw de volledige prompt-context uit memory en database."""
+def build_context(conn: sqlite3.Connection, memory_dir: Path,
+                  config: dict | None = None) -> str:
+    """Bouw de volledige prompt-context uit memory en database.
+
+    ``config`` (optioneel) levert de actuele drempels per sport. Dat is nodig
+    omdat elk advies een concreet hartslag- of vermogensdoel met zone moet
+    noemen, en die grenzen per sport verschillen; zonder config staan ze
+    alleen in doelen.md.
+    """
     doelen = (memory_dir / "doelen.md").read_text(encoding="utf-8")
     vorige = _last_md_section(memory_dir / "adviezen.md", heading_contains="Weekadvies")
 
-    blocks = [
+    blocks = []
+    if config:
+        blocks.append(
+            "# Zone-indeling per sport (gebruik uitsluitend deze grenzen)\n\n"
+            + zone_overview_text(config["athlete"])
+        )
+    blocks += [
         f"# Doelen en voorkeuren van de atleet\n\n{doelen}",
         f"# Weekschema\n\n{schedule_as_text(memory_dir)}",
         f"# Belastingsoverzicht\n\n{_week_stats(conn)}",
@@ -140,9 +168,14 @@ def build_context(conn: sqlite3.Connection, memory_dir: Path) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def generate_advice(router: LLMRouter, conn: sqlite3.Connection, memory_dir: Path) -> str:
-    """Genereer een nieuw advies via de API en leg het vast in memory/adviezen.md."""
-    context = build_context(conn, memory_dir)
+def generate_advice(router: LLMRouter, conn: sqlite3.Connection, memory_dir: Path,
+                    config: dict | None = None) -> str:
+    """Genereer een nieuw advies via de API en leg het vast in memory/adviezen.md.
+
+    ``config`` levert de drempels per sport mee, zodat het advies zijn
+    hartslag- en vermogensdoelen tegen de juiste zonegrenzen formuleert.
+    """
+    context = build_context(conn, memory_dir, config)
     advies = router.ask("advice", context, system=SYSTEM)
     if not advies.strip():
         # Niet opslaan: een lege sectie in adviezen.md verdringt anders het
@@ -197,6 +230,7 @@ def generate_insights(
     conn: sqlite3.Connection,
     memory_dir: Path,
     progress_text: str = "",
+    config: dict | None = None,
 ) -> str:
     """Laat de cloud-coach trends analyseren en leg de inzichten vast.
 
@@ -204,7 +238,7 @@ def generate_insights(
     decoupling, records) zodat het model met harde cijfers werkt in plaats
     van ze zelf te moeten afleiden.
     """
-    context = build_context(conn, memory_dir)
+    context = build_context(conn, memory_dir, config)
     if progress_text:
         context += f"\n\n---\n\n# Voortgangsstatistieken\n\n{progress_text}"
     context += (

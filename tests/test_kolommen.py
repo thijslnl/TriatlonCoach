@@ -20,18 +20,19 @@ sys.stdout.reconfigure(encoding="utf-8")  # arrows/em-dash op een cp1252-console
 
 from tricoach.analysis import aerobic_efficiency_trend
 from tricoach.config import load_config, resolve_path
+from tricoach.sportzones import zone_overview_text
 from tricoach.storage import connect, load_activities, recompute_zones
-from tricoach.zones import zone_bounds
 
 pd.set_option("display.width", 200)
 
 config = load_config()
-bounds = zone_bounds(config["athlete"])
 conn = connect(resolve_path(config, "database"))
 
 # Migratie draait al in connect(); vul de nieuwe kolommen voor bestaande rijen.
-n = recompute_zones(conn, bounds)
-print(f"Backfill: {n} sessies herberekend (zones={bounds}).\n")
+# De zonegrenzen zijn sport-afhankelijk (loop-LTHR, fiets-LTHR, zwemmen geen).
+n = recompute_zones(conn, config["athlete"])
+print(f"Backfill: {n} sessies herberekend met de drempels per sport:")
+print(zone_overview_text(config["athlete"]) + "\n")
 
 acts = load_activities(conn)
 trend = aerobic_efficiency_trend(acts)

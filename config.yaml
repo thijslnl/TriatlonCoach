@@ -4,8 +4,13 @@
 athlete:
   name: Thijs
   max_hr: 193
-  lthr: 170
-  ftp: null
+  thresholds:
+    running:
+      lthr: 164
+      lthr_source: Garmin-schatting (bevestigd)
+    cycling:
+      lthr: 156
+      ftp: null
   zone_pct_lthr:
   - 0.8
   - 0.89
@@ -23,7 +28,7 @@ races:
   goal: Goed finishen (eerste race)
   target_time: ''
 - name: IRONMAN 70.3 Luxembourg (Remich)
-  date: 2027-06-01
+  date: 2027-07-11
   swim_m: 1900
   bike_m: 90000
   run_m: 21100

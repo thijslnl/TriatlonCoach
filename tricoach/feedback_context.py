@@ -58,7 +58,14 @@ from tricoach.storage import (
 )
 from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 from tricoach.trainingslog import kerncijfers, zone_regel
-from tricoach.zones import intensity_category, zone_bounds
+from tricoach.sportzones import (
+    METHOD_NONE,
+    ftp as athlete_ftp,
+    zone2_range,
+    zone_model,
+    zone_overview_text,
+)
+from tricoach.zones import intensity_category
 
 # Hoeveel vergelijkbare eerdere sessies er maximaal meegaan.
 MAX_SIMILAR = 5
@@ -252,11 +259,15 @@ def _bike_power_detail(act: ParsedActivity, ftp: float | None) -> str | None:
             f"{z} {fmt_duration(v)} ({v / totaal * 100:.0f}%)"
             for z, v in tip.items() if v > 0
         )
-        regels.append(f"- Tijd in vermogenszones (FTP {ftp:.0f} W, Coggan): {verdeling}")
+        regels.append(
+            f"- Tijd in vermogenszones (FTP {ftp:.0f} W, Coggan) — dit is de "
+            f"PRIMAIRE zone-indeling voor deze rit: {verdeling}"
+        )
     else:
         regels.append(
-            "- Vermogenszones: nog niet beschikbaar (FTP onbekend — geen "
-            "zone-oordeel over het vermogen geven)"
+            "- Vermogenszones: nog niet beschikbaar (FTP onbekend). Geef geen "
+            "zone-oordeel over het vermogen; de hartslagzones op de fiets-LTHR "
+            "zijn zolang de tussenoplossing. De getallen zelf mogen wel."
         )
     return "\n".join(regels)
 
@@ -341,13 +352,17 @@ def session_block(
     if s.get("total_calories"):
         regels.append(f"- Calorieën: {s['total_calories']:.0f} kcal")
 
-    zone_noot = ""
+    # Zwemmen krijgt bewust geen zoneregel: er is geen zwemdrempel en dus geen
+    # zone-indeling. De gemiddelde/max hartslag staat al bij de kerncijfers en
+    # blijft daar losse context.
     if act.sport == "swimming":
-        zone_noot = (
-            " (alleen als losse context — polshartslag onder water is "
-            "onbetrouwbaar; NIET als beoordelingsmaat gebruiken)"
+        regels.append(
+            "- Tijd in zones: niet van toepassing — zwemmen kent in deze app "
+            "geen drempel en geen zone-oordeel (techniek, afstand en tempo per "
+            "100 m tellen; polshartslag onder water is onbetrouwbaar)"
         )
-    regels.append(f"- Tijd in zones: {zone_regel(tiz)} — verdeling: {shares}{zone_noot}")
+    else:
+        regels.append(f"- Tijd in zones: {zone_regel(tiz)} — verdeling: {shares}")
 
     if act.sport in ("running", "cycling"):
         drift = hr_drift(act.records)
@@ -533,13 +548,15 @@ def similar_sessions_block(conn: sqlite3.Connection, act: ParsedActivity,
 
 
 def pace_history_block(conn: sqlite3.Connection, act: ParsedActivity,
-                       z2: tuple[int, int]) -> str | None:
+                       z2: tuple[int, int] | None) -> str | None:
     """Tempo-bij-gelijke-hartslag (zone 2) als trendlijst — lopen/fietsen.
 
     Dit is de belangrijkste voortgangsmaat: sneller bij dezelfde hartslag =
-    aerobe groei. Voor zwemmen niet zinvol (onbetrouwbare pols-HR), dan None.
+    aerobe groei. ``z2`` is het zone 2-bereik van déze sport (loop-LTHR bij
+    lopen, fiets-LTHR bij fietsen). Voor zwemmen niet zinvol (onbetrouwbare
+    pols-HR en geen drempel), dan None.
     """
-    if act.sport not in ("running", "cycling"):
+    if act.sport not in ("running", "cycling") or z2 is None:
         return None
     acts = training_activities(load_activities(conn))
     trend = pace_at_hr(conn, acts, act.sport, z2)
@@ -659,14 +676,40 @@ def recent_notes_block(conn: sqlite3.Connection, act: ParsedActivity,
 
 # ------------------------------------------------------ profiel & continuïteit --
 
+def zone_policy_block(athlete: dict, sport: str, has_power: bool = True) -> str:
+    """Waarop wordt déze sessie beoordeeld? Drempel, methode en grenzen.
+
+    Staat bewust vóór de sessiecijfers in de prompt: het model moet weten
+    welke maatstaf geldt vóór het een oordeel velt. Naast de indeling voor
+    deze sport gaat het volledige overzicht mee, zodat de coach niet per
+    ongeluk de loopgrenzen op een rit toepast.
+    """
+    model = zone_model(athlete, sport, has_power=has_power)
+    regels = [f"Deze sessie ({sport_label(sport)}) wordt beoordeeld op: {model.summary()}"]
+    if model.method == METHOD_NONE:
+        regels.append(
+            "Geef dus GEEN zone-oordeel over deze sessie en reken de atleet "
+            "niet af op hartslag."
+        )
+    elif model.provisional:
+        regels.append(
+            "LET OP — dit is een tussenoplossing: zodra de FTP bekend is "
+            "(ramptest op de Kickr) verschuift het oordeel voor fietsen naar "
+            "vermogen. Benoem de hartslagzones hier dus met die slag om de arm."
+        )
+    regels.append("")
+    regels.append("Zone-indeling per sport (ter referentie):")
+    regels.append(zone_overview_text(athlete))
+    return "\n".join(regels)
+
+
 def profile_block(memory_dir: Path, config: dict) -> str:
-    """Atletenprofiel: doelen.md volledig + de actuele zonegrenzen uit config."""
-    bounds = zone_bounds(config["athlete"])
+    """Atletenprofiel: doelen.md volledig + de actuele zone-indeling per sport."""
+    athlete = config["athlete"]
     zones = (
-        f"Actuele zones (%LTHR, LTHR {config['athlete']['lthr']}, "
-        f"max HR {config['athlete']['max_hr']}): "
-        f"Z2 {bounds[0]}-{bounds[1] - 1} · Z3 {bounds[1]}-{bounds[2] - 1} · "
-        f"Z4 {bounds[2]}-{bounds[3] - 1} · Z5 {bounds[3]}+"
+        f"Actuele zone-indeling per sport (max HR {athlete['max_hr']}; de "
+        "%drempel-methode is leidend, %max alleen terugval):\n"
+        + zone_overview_text(athlete)
     )
     doelen_path = memory_dir / "doelen.md"
     doelen = (
@@ -726,12 +769,18 @@ def build_feedback_context(
     training_label: str | None = None,
 ) -> str:
     """Bouw de volledige prompt-context voor de feedback op één sessie."""
-    bounds = zone_bounds(config["athlete"])
-    z2 = (bounds[0], bounds[1] - 1)
-
-    ftp = config["athlete"].get("ftp") or None
+    athlete = config["athlete"]
+    # Het zone 2-bereik is sport-afhankelijk: de tempo-bij-gelijke-hartslag-
+    # historie van een rit hoort tegen de fiets-LTHR, die van een loop tegen
+    # de loop-LTHR. Bij zwemmen bestaat er geen bereik (None).
+    z2 = zone2_range(athlete, act.sport)
+    ftp = athlete_ftp(athlete)
+    heeft_power = (not act.records.empty and "power" in act.records
+                   and act.records["power"].notna().any())
 
     blocks = [
+        "# Beoordelingsmaat voor deze sessie\n\n"
+        + zone_policy_block(athlete, act.sport, has_power=heeft_power),
         "# Zojuist voltooide sessie\n\n"
         + session_block(act, tiz, observation, user_note, wind, training_label,
                         ftp=ftp),

@@ -94,7 +94,13 @@ from tricoach.rundynamics import (
 from tricoach.llm import LLMRouter
 from tricoach.llm.log import usage_summary
 from tricoach.llm.observations import session_observation
-from tricoach.lthr import append_entry as lthr_append, load_history as lthr_history
+from tricoach.lthr import (
+    BIKE_FTP as LTHR_BIKE_FTP,
+    BIKE_LTHR as LTHR_BIKE,
+    RUN_LTHR as LTHR_RUN,
+    append_entry as lthr_append,
+    load_history as lthr_history,
+)
 from tricoach.palette import get_palette, with_alpha
 from tricoach.viz import (
     PLOTLY_CONFIG,
@@ -124,18 +130,48 @@ from tricoach.storage import (
 )
 from tricoach.transport import is_transport, mark_transport, unmark_transport
 from tricoach.weather import wind_for_activity
-from tricoach.zones import bounds_from_lthr, zone_bounds
+from tricoach.zones import bounds_from_lthr
+from tricoach.sportzones import (
+    CYCLING,
+    RUNNING,
+    SWIMMING,
+    bike_lthr,
+    bike_lthr_is_estimated,
+    ftp as athlete_ftp,
+    hr_zone_bounds,
+    run_lthr,
+    run_lthr_source,
+    set_thresholds,
+    zone2_range,
+    zone_model,
+    zone_overview,
+)
+from tricoach.ramptest import (
+    RAMP_FTP_FACTOR,
+    ftp_proposal,
+    is_ramp_test,
+    log_ftp_determination,
+)
 
 dotenv.load_dotenv()
 
 st.set_page_config(page_title="Triatlon Coach", page_icon="🏊", layout="wide")
 
 config = load_config()
-BOUNDS = zone_bounds(config["athlete"])
-Z2 = (BOUNDS[0], BOUNDS[1] - 1)  # Z2-bereik, bijv. 137-151
+ATHLETE = config["athlete"]
+# Drempels en zonegrenzen zijn sport-afhankelijk (zie tricoach.sportzones):
+# hardlopen op de loop-LTHR, fietsen op de fiets-LTHR (of %FTP zodra die
+# bekend is), zwemmen zonder zones.
+RUN_BOUNDS = hr_zone_bounds(ATHLETE, RUNNING)
+BIKE_BOUNDS = hr_zone_bounds(ATHLETE, CYCLING)
+RUN_Z2 = zone2_range(ATHLETE, RUNNING)    # bijv. (131, 145) bij LTHR 164
+BIKE_Z2 = zone2_range(ATHLETE, CYCLING)
+# De hartslagzonegrenzen per sport, voor grafieken die één sessie tekenen.
+SPORT_BOUNDS = {RUNNING: RUN_BOUNDS, CYCLING: BIKE_BOUNDS, SWIMMING: None}
 # FTP (W) voor de vermogenszones; None zolang er geen (geteste of geschatte)
-# waarde op de instellingen-tab staat — power wordt dan zonder zones getoond.
-FTP = config["athlete"].get("ftp") or None
+# waarde op de instellingen-tab staat — fietsen valt dan terug op de
+# fiets-LTHR-hartslagzones.
+FTP = athlete_ftp(ATHLETE)
 MEMORY_DIR = resolve_path(config, "memory_dir")
 # Origineel-archief van alle geüploade FIT-bestanden (zie tricoach.archive).
 UPLOADS_DIR = uploads_root(config)
@@ -146,14 +182,37 @@ TZ = "Europe/Amsterdam"  # Garmin slaat tijden op in UTC; tonen in lokale tijd
 # volgt het actieve Streamlit-thema.
 PAL = get_palette(getattr(getattr(st.context, "theme", None), "type", "light"))
 SPORT_COLORS = PAL["sport"]
+# Zonelabels zonder hartslaggrenzen: de grenzen verschillen per sport, dus in
+# een grafiek die sporten optelt (weekoverzicht) zou één vast bereik liegen.
+# Voor één sport tegelijk geeft zone_labels_for() de labels mét grenzen.
 ZONE_LABELS = {
-    "Z1": f"Zone 1 (< {BOUNDS[0]})",
-    "Z2": f"Zone 2 ({BOUNDS[0]}–{BOUNDS[1]})",
-    "Z3": f"Zone 3 ({BOUNDS[1]}–{BOUNDS[2]})",
-    "Z4": f"Zone 4 ({BOUNDS[2]}–{BOUNDS[3]})",
-    "Z5": f"Zone 5 (> {BOUNDS[3]})",
+    "Z1": "Zone 1 (herstel)",
+    "Z2": "Zone 2 (rustig duurtempo)",
+    "Z3": "Zone 3 (grijze zone)",
+    "Z4": "Zone 4 (drempel)",
+    "Z5": "Zone 5 (maximaal)",
 }
 ZONE_COLORS = dict(zip(ZONE_LABELS.values(), PAL["zones"]))
+
+
+def zone_labels_for(bounds: list[int]) -> dict[str, str]:
+    """Zonelabels mét hartslaggrenzen, voor een grafiek over één sport."""
+    return {
+        "Z1": f"Zone 1 (< {bounds[0]})",
+        "Z2": f"Zone 2 ({bounds[0]}–{bounds[1] - 1})",
+        "Z3": f"Zone 3 ({bounds[1]}–{bounds[2] - 1})",
+        "Z4": f"Zone 4 ({bounds[2]}–{bounds[3] - 1})",
+        "Z5": f"Zone 5 (> {bounds[3]})",
+    }
+
+
+def zone_methode_caption() -> str:
+    """Eén regel die per sport toont waarop beoordeeld wordt (UI-onderschrift)."""
+    return " · ".join(
+        f"**{sport_label(m.sport)}**: "
+        + (m.bounds_text() if m.has_zones else "geen zones")
+        for m in zone_overview(ATHLETE)
+    )
 # Vaste kleur per zwemslag (Nederlandse labels), zodat elke slag in elke
 # grafiek dezelfde kleur houdt — ook als een sessie maar twee slagen bevat.
 STROKE_COLORS = dict(zip(
@@ -217,12 +276,14 @@ def trend_cell(info: dict | None) -> str:
     return tekst + " ⚠" if not info["exact"] else tekst
 
 
-def veilig_cel(func, *args, fallback: str = GEEN_WAARDE) -> str:
-    """Voer een cel-formatter uit; bij een fout een streepje i.p.v. een crash.
+def veilig_cel(func, *args, fallback=GEEN_WAARDE):
+    """Voer een cel-formatter uit; bij een fout de fallback i.p.v. een crash.
 
     Algemeen vangnet voor de 'Recente sessies'-tabel: een probleem op één
     sessie (een ontbrekend of NaN-veld) levert hooguit een placeholder in die
-    cel op, nooit een ValueError die de hele pagina onderuit haalt.
+    cel op, nooit een ValueError die de hele pagina onderuit haalt. Ook bruikbaar
+    voor niet-tekstuele berekeningen door een eigen ``fallback`` mee te geven
+    (bijv. ``None`` als "kon niet worden bepaald").
     """
     try:
         return func(*args)
@@ -568,6 +629,12 @@ with tab_overzicht:
 
     with col_rechts:
         st.subheader("Tijd in hartslagzones per week")
+        st.caption(
+            "De grenzen verschillen per sport, dus de balken tellen zones op "
+            "die elk tegen hun eigen drempel zijn bepaald: "
+            + zone_methode_caption()
+            + ". Zwemmen telt hier niet mee (geen zones)."
+        )
         tz_df = weekly_zone_time(trainingen)
         tz_df["zone"] = tz_df["zone"].map(ZONE_LABELS)
         als_pct = st.toggle(
@@ -593,46 +660,80 @@ with tab_overzicht:
             hovertemplate=f"%{{x}} · %{{fullData.name}}: {hover_fmt}<extra></extra>")
         chart(fig)
 
-    st.subheader("Mijn hartslagzones & LTHR-ontwikkeling")
+    st.subheader("Mijn drempels & zones per sport")
     st.caption(
-        f"De zones worden afgeleid van je drempelhartslag (LTHR, nu **{config['athlete']['lthr']}**). "
-        "Wordt je LTHR hoger, dan schuiven alle zones mee — pas hem aan op de instellingen-tab. "
-        "Zone 2 is het rustige duurtempo waar je veel wilt zitten; zone 3 de 'grijze zone'; "
-        "zone 4/5 zwaar tot maximaal."
+        "Elke sport heeft een eigen drempel; ze zijn niet uitwisselbaar. "
+        + zone_methode_caption()
+        + ". Pas ze aan op de ⚙️ Instellingen-tab; de zonetijden van alle "
+        "sessies worden dan herrekend."
     )
-    hist = lthr_history(MEMORY_DIR, config["athlete"]["lthr"])
-    dates = [pd.Timestamp(d) for d in hist["datum"]]
-    end = pd.Timestamp(date.today())
-    if end <= dates[-1]:
-        end = dates[-1] + pd.Timedelta(days=30)
-    dates.append(end)
-    lthrs = list(hist["lthr"]) + [int(hist["lthr"].iloc[-1])]
-    pcts = config["athlete"].get("zone_pct_lthr")
-    per_date = [bounds_from_lthr(l, pcts) for l in lthrs]
+    m_run, m_bike, m_swim = zone_overview(ATHLETE)
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Loop-LTHR", f"{run_lthr(ATHLETE)} bpm",
+              help=run_lthr_source(ATHLETE) or "Handmatig ingesteld.")
+    k2.metric("FTP (fietsen)", f"{FTP:.0f} W" if FTP else "onbekend",
+              help="Zodra de FTP bekend is, worden fietssessies op "
+                   "%FTP-vermogenszones beoordeeld in plaats van op hartslag.")
+    k3.metric("Fiets-LTHR", f"{bike_lthr(ATHLETE)} bpm",
+              help="Geschat uit de loop-LTHR." if bike_lthr_is_estimated(ATHLETE)
+                   else "Handmatig ingesteld.")
+    if m_bike.provisional:
+        st.info(
+            "🔧 **Tussenoplossing voor fietsen:** er is nog geen FTP, dus "
+            f"fietssessies worden voorlopig op hartslagzones rond de "
+            f"fiets-LTHR ({bike_lthr(ATHLETE)} bpm) beoordeeld. Doe een "
+            "ramptest op de Kickr en vul de FTP in — dan schakelt de app over "
+            "op %FTP-vermogenszones, de zuiverdere maat voor fietsen."
+        )
 
-    fig = go.Figure()
-    floor = min(b[0] for b in per_date) - 25
-    fig.add_trace(go.Scatter(  # onzichtbare onderkant van de zone-1-band
-        x=dates, y=[floor] * len(dates), line=dict(width=0),
-        line_shape="hv", hoverinfo="skip", showlegend=False,
-    ))
-    tops = [
-        [b[0] for b in per_date], [b[1] for b in per_date],
-        [b[2] for b in per_date], [b[3] for b in per_date],
-        [config["athlete"]["max_hr"]] * len(dates),
-    ]
-    for (label, kleur), top in zip(ZONE_COLORS.items(), tops):
-        fig.add_trace(go.Scatter(
-            x=dates, y=top, name=label, fill="tonexty",
-            line=dict(width=0), fillcolor=with_alpha(kleur, 0.55), line_shape="hv",
-            hovertemplate=f"{label}: tot %{{y}} bpm<extra></extra>",
+    st.markdown("**Loop-LTHR door de tijd** (de zones voor hardlopen schuiven mee)")
+    st.caption(
+        "De sprong van 171 naar 164 in juli 2026 is een bewuste herijking op de "
+        "Garmin-schatting, geen conditieverlies — zie memory/beslissingen.md. "
+        "Alle zonecijfers zijn met de nieuwe drempel herrekend, dus de trends "
+        "zijn onderling vergelijkbaar."
+    )
+    hist = lthr_history(MEMORY_DIR, run_lthr(ATHLETE), kind=LTHR_RUN)
+    if hist.empty:
+        st.info("Nog geen loop-LTHR-geschiedenis vastgelegd.")
+    else:
+        dates = [pd.Timestamp(d) for d in hist["datum"]]
+        end = pd.Timestamp(date.today())
+        if end <= dates[-1]:
+            end = dates[-1] + pd.Timedelta(days=30)
+        dates.append(end)
+        lthrs = list(hist["lthr"]) + [int(hist["lthr"].iloc[-1])]
+        pcts = ATHLETE.get("zone_pct_lthr")
+        per_date = [bounds_from_lthr(l, pcts) for l in lthrs]
+
+        # Labels mét grenzen: deze grafiek gaat over één sport (hardlopen).
+        run_labels = zone_labels_for(RUN_BOUNDS)
+        fig = go.Figure()
+        floor = min(b[0] for b in per_date) - 25
+        fig.add_trace(go.Scatter(  # onzichtbare onderkant van de zone-1-band
+            x=dates, y=[floor] * len(dates), line=dict(width=0),
+            line_shape="hv", hoverinfo="skip", showlegend=False,
         ))
-    fig.add_trace(go.Scatter(
-        x=dates, y=lthrs, name="LTHR", line=dict(color=PAL["ink"], dash="dash", width=2),
-        line_shape="hv", hovertemplate="LTHR: %{y} bpm<extra></extra>",
-    ))
-    fig.update_layout(yaxis_title="Hartslag (bpm)", xaxis_title="Datum")
-    chart(fig)
+        tops = [
+            [b[0] for b in per_date], [b[1] for b in per_date],
+            [b[2] for b in per_date], [b[3] for b in per_date],
+            [ATHLETE["max_hr"]] * len(dates),
+        ]
+        for (zone, kleur), top in zip(zip(ZONE_LABELS, PAL["zones"]), tops):
+            label = run_labels[zone]
+            fig.add_trace(go.Scatter(
+                x=dates, y=top, name=label, fill="tonexty",
+                line=dict(width=0), fillcolor=with_alpha(kleur, 0.55),
+                line_shape="hv",
+                hovertemplate=f"{label}: tot %{{y}} bpm<extra></extra>",
+            ))
+        fig.add_trace(go.Scatter(
+            x=dates, y=lthrs, name="Loop-LTHR",
+            line=dict(color=PAL["ink"], dash="dash", width=2),
+            line_shape="hv", hovertemplate="Loop-LTHR: %{y} bpm<extra></extra>",
+        ))
+        fig.update_layout(yaxis_title="Hartslag (bpm)", xaxis_title="Datum")
+        chart(fig)
 
     st.subheader("Recente sessies")
     trend = aerobic_efficiency_trend(trainingen)
@@ -729,8 +830,11 @@ with tab_overzicht:
                      "zoals Garmin). Alleen voor fietssessies."),
             "% Z2": st.column_config.TextColumn(
                 "% Zone 2",
-                help=f"Aandeel van de gemeten hartslagtijd in zone 2 ({Z2[0]}–{Z2[1]}). "
-                     "Groen = veel rustige tijd; oranje = juist veel in Z3+."),
+                help="Aandeel van de gemeten hartslagtijd in zone 2. De grens "
+                     f"verschilt per sport: hardlopen {RUN_Z2[0]}–{RUN_Z2[1]}, "
+                     f"fietsen {BIKE_Z2[0]}–{BIKE_Z2[1]}. Groen = veel rustige "
+                     "tijd; oranje = juist veel in Z3+. Zwemmen krijgt geen "
+                     "zone-oordeel."),
             "Zones": st.column_config.TextColumn(
                 "Zoneverdeling",
                 help="Tijd per zone in 10 blokjes: 🟦 Z1 · 🟩 Z2 · 🟨 Z3 · 🟧 Z4 · 🟥 Z5."),
@@ -797,16 +901,19 @@ with tab_overzicht:
 
 # ------------------------------------------------------------------ trends --
 with tab_trends:
-    st.subheader(f"Tempo bij gelijke hartslag (zone 2: {Z2[0]}–{Z2[1]})")
+    st.subheader("Tempo bij gelijke hartslag (zone 2)")
     st.caption(
         "De belangrijkste grafiek: gemiddeld tempo van alle meetpunten binnen zone 2, "
         "per sessie. Sneller worden bij dezelfde hartslag = grotere aerobe basis. "
-        "Sessies met minder dan 5 minuten in zone 2 worden weggelaten."
+        "Sessies met minder dan 5 minuten in zone 2 worden weggelaten. Zone 2 "
+        f"loopt bij hardlopen van {RUN_Z2[0]} tot {RUN_Z2[1]} (loop-LTHR "
+        f"{run_lthr(ATHLETE)}) en bij fietsen van {BIKE_Z2[0]} tot {BIKE_Z2[1]} "
+        f"(fiets-LTHR {bike_lthr(ATHLETE)}) — elke sport tegen zijn eigen drempel."
     )
 
     col_run, col_bike = st.columns(2)
     with col_run:
-        run_trend = cache_pace_at_hr("running", Z2, DATA_VERSIE)
+        run_trend = cache_pace_at_hr("running", RUN_Z2, DATA_VERSIE)
         n_runs = (trainingen["sport"] == "running").sum()
         if run_trend.empty:
             st.info("Nog geen loopsessies met ≥5 min in zone 2 — dat zegt op zich al iets 😉")
@@ -821,7 +928,9 @@ with tab_trends:
                 marker=dict(size=11),
                 hovertemplate="%{x|%d-%m-%Y} · %{y|%M:%S} min/km<extra></extra>",
             )
-            fig.update_layout(title="Hardlopen — tempo in zone 2 (sneller = hoger)")
+            fig.update_layout(
+                title=f"Hardlopen — tempo in zone 2 ({RUN_Z2[0]}–{RUN_Z2[1]}, "
+                      "sneller = hoger)")
             toon_legenda = len(run_trend) >= 4
             if toon_legenda:  # voortschrijdend gemiddelde dempt dagvorm en weer
                 fig.update_traces(name="Per sessie", showlegend=True)
@@ -842,7 +951,7 @@ with tab_trends:
             )
 
     with col_bike:
-        bike_trend = cache_pace_at_hr("cycling", Z2, DATA_VERSIE)
+        bike_trend = cache_pace_at_hr("cycling", BIKE_Z2, DATA_VERSIE)
         n_rides = (trainingen["sport"] == "cycling").sum()
         if bike_trend.empty:
             st.info("Nog geen fietssessies met ≥5 min in zone 2.")
@@ -855,7 +964,9 @@ with tab_trends:
                 marker=dict(size=11),
                 hovertemplate="%{x|%d-%m-%Y} · %{y:.1f} km/h<extra></extra>",
             )
-            fig.update_layout(title="Fietsen — snelheid in zone 2")
+            fig.update_layout(
+                title=f"Fietsen — snelheid in zone 2 ({BIKE_Z2[0]}–{BIKE_Z2[1]}, "
+                      "fiets-LTHR)")
             toon_legenda = len(bike_trend) >= 4
             if toon_legenda:
                 fig.update_traces(name="Per sessie", showlegend=True)
@@ -951,12 +1062,16 @@ with tab_trends:
             fig.update_traces(hovertemplate=hover)
             if soort == "tempo":
                 pace_axis(fig)
-            # Zone-2-band: zo zie je meteen welke sessies echt rustig waren.
-            fig.add_vrect(
-                x0=Z2[0], x1=Z2[1], line_width=0,
-                fillcolor=with_alpha(PAL["zones"][1], 0.15),
-                annotation_text="zone 2", annotation_position="top left",
-                annotation_font_color=PAL["muted"])
+            # Zone-2-band van déze sport: zo zie je meteen welke sessies echt
+            # rustig waren. Zwemmen krijgt geen band — daar gelden geen zones.
+            sport_z2 = zone2_range(ATHLETE, sport_key)
+            if sport_z2:
+                fig.add_vrect(
+                    x0=sport_z2[0], x1=sport_z2[1], line_width=0,
+                    fillcolor=with_alpha(PAL["zones"][1], 0.15),
+                    annotation_text=f"zone 2 ({sport_z2[0]}–{sport_z2[1]})",
+                    annotation_position="top left",
+                    annotation_font_color=PAL["muted"])
             fig.update_layout(title=titel)
             chart(fig, show_legend=False)
 
@@ -1263,6 +1378,27 @@ with tab_sessie:
               help="Gemiddelde hartslag van de tweede helft minus de eerste helft. "
                    "Duidelijk oplopend = vermoeidheid of een te hoog begintempo.")
 
+    # Waarop wordt déze sessie beoordeeld? Expliciet in beeld, zodat nooit
+    # onduidelijk is welke drempel en welke zonegrenzen gelden.
+    sessie_heeft_power = (not rec.empty and "power" in rec
+                          and rec["power"].notna().any())
+    sessie_model = zone_model(ATHLETE, sessie["sport"], has_power=sessie_heeft_power)
+    if not sessie_model.has_zones:
+        st.caption(f"⚖️ **Beoordeling:** {sessie_model.reason} — geen zone-oordeel.")
+    elif sessie_model.provisional:
+        st.warning(
+            f"⚖️ **Beoordeling:** {sessie_model.method_label} op "
+            f"{sessie_model.threshold_label} → {sessie_model.bounds_text()}. "
+            "Dit is een tussenoplossing: zodra je de FTP invult (ramptest op de "
+            "Kickr) stapt deze rit over op %FTP-vermogenszones."
+        )
+    else:
+        st.caption(
+            f"⚖️ **Beoordeling:** {sessie_model.method_label} op "
+            f"{sessie_model.threshold_label} → {sessie_model.bounds_text()}"
+            + (f" · {sessie_model.reason}" if sessie_model.reason else "")
+        )
+
     if sessie["sport"] == "cycling" and pd.notna(sessie.get("avg_power")):
         # Vermogenskerncijfers (sinds de Rally/Kickr). EF = NP per hartslag:
         # windonafhankelijk, dus de zuiverste aerobe maat voor het fietsen.
@@ -1291,6 +1427,62 @@ with tab_sessie:
                   + (str(bron) if bron and pd.notna(bron) else "onbekend"),
                   help="Pedalen (buiten) en trainer (binnen) meten net iets "
                        "anders; vergelijk trends binnen dezelfde bron.")
+
+        # FTP-test herkennen (ramptest op de Kickr of een 20-minuten-veldtest)
+        # en er een voorstel uit afleiden. Het voorstel wordt nooit automatisch
+        # opgeslagen: de atleet bevestigt hem hieronder.
+        voorstel = veilig_cel(ftp_proposal, rec, bool(sessie.get("is_indoor")),
+                              fallback=None)
+        if voorstel:
+            ramp = veilig_cel(is_ramp_test, rec, bool(sessie.get("is_indoor")),
+                              fallback=False)
+            kop = ("🧗 **Dit ziet eruit als een ramptest.**" if ramp
+                   else "📈 **Er zit een 20-minuten-inspanning in deze rit.**")
+            with st.expander(
+                    f"{kop.strip('*# ')} — FTP-voorstel: "
+                    f"{voorstel.ftp_watt:.0f} W", expanded=bool(ramp)):
+                st.markdown(
+                    f"{kop}\n\n{voorstel.explanation}\n\n"
+                    f"- **Gemeten:** {voorstel.basis_watt:.0f} W over "
+                    f"{voorstel.window_s // 60} min\n"
+                    f"- **Afleiding:** {voorstel.factor:.0%} → "
+                    f"**{voorstel.ftp_watt:.0f} W**\n"
+                    f"- **Betrouwbaarheid:** {voorstel.confidence}\n"
+                )
+                huidige_ftp = f"{FTP:.0f} W" if FTP else "nog niet ingesteld"
+                st.caption(
+                    f"Huidige FTP-instelling: {huidige_ftp}. Bevestigen zet de "
+                    "waarde in config.yaml, herrekent de vermogenszones van "
+                    "alle ritten en legt de vaststelling vast in "
+                    "memory/inzichten.md en de drempelgeschiedenis."
+                )
+                if st.button(f"✅ FTP op {voorstel.ftp_watt:.0f} W zetten",
+                             key=f"ftp_bevestig_{gekozen}"):
+                    nieuwe_ftp = float(round(voorstel.ftp_watt))
+                    nieuw = copy.deepcopy(config)
+                    set_thresholds(nieuw["athlete"], run_lthr(ATHLETE),
+                                   bike_lthr(ATHLETE), nieuwe_ftp)
+                    save_config(nieuw)
+                    profile_mod.update_doelen(MEMORY_DIR, config, nieuw,
+                                              note=f"FTP uit {voorstel.method}")
+                    n_pw = recompute_power_zones(conn, nieuwe_ftp)
+                    lthr_append(MEMORY_DIR, int(nieuwe_ftp),
+                                f"Vastgesteld met {voorstel.method} "
+                                f"({voorstel.basis_watt:.0f} W)",
+                                kind=LTHR_BIKE_FTP)
+                    log_ftp_determination(
+                        MEMORY_DIR, nieuwe_ftp, voorstel.method,
+                        basis_watt=voorstel.basis_watt,
+                        session_date=sessie["start_time"],
+                        note="Bevestigd vanuit het sessie-detail in het dashboard.")
+                    st.session_state["settings_flash"] = (
+                        f"FTP op {nieuwe_ftp:.0f} W gezet ({voorstel.method}); "
+                        f"vermogenszones van {n_pw} ritten herrekend."
+                    )
+                    st.success(
+                        f"FTP vastgesteld op {nieuwe_ftp:.0f} W — "
+                        f"vermogenszones van {n_pw} ritten herrekend.")
+                    st.rerun()
 
     if sessie["sport"] == "running":
         # Loopdynamiek van deze sessie (zelfde getallen als Garmin Connect;
@@ -1442,13 +1634,21 @@ with tab_sessie:
         fig = make_subplots(rows=rijen, cols=1, shared_xaxes=True,
                             row_heights=gewichten,
                             vertical_spacing=0.05)
-        # Zonebanden achter de hartslaglijn: in één blik zie je de zone.
-        onder = float(min(hr_glad.min(), BOUNDS[0] - 10))
-        boven = float(max(hr_glad.max() + 5, BOUNDS[3] + 5))
-        grenzen = [onder, *BOUNDS, boven]
-        for i in range(5):
-            fig.add_hrect(y0=grenzen[i], y1=grenzen[i + 1], line_width=0,
-                          fillcolor=with_alpha(PAL["zones"][i], 0.14), row=1, col=1)
+        # Zonebanden achter de hartslaglijn, met de grenzen van déze sport: in
+        # één blik zie je de zone. Zwemmen krijgt geen banden — daar is bewust
+        # geen zone-oordeel (onbetrouwbare pols-HR, techniek in opbouw).
+        sessie_bounds = SPORT_BOUNDS.get(sessie["sport"])
+        if sessie_bounds:
+            onder = float(min(hr_glad.min(), sessie_bounds[0] - 10))
+            boven = float(max(hr_glad.max() + 5, sessie_bounds[3] + 5))
+            grenzen = [onder, *sessie_bounds, boven]
+            for i in range(5):
+                fig.add_hrect(y0=grenzen[i], y1=grenzen[i + 1], line_width=0,
+                              fillcolor=with_alpha(PAL["zones"][i], 0.14),
+                              row=1, col=1)
+        else:
+            onder = float(hr_glad.min() - 5)
+            boven = float(hr_glad.max() + 5)
         fig.add_trace(go.Scatter(
             x=rec["minuut"], y=hr_glad, name="Hartslag",
             line=dict(color=PAL["ink"], width=2),
@@ -1821,16 +2021,27 @@ with tab_fietsen:
                 "opnieuw te uploaden."
             )
         else:
-            # FTP-status: ingesteld → tonen; onbekend → schatting aanbieden.
+            # FTP-status: ingesteld → vermogen is leidend; onbekend → de
+            # fiets-hartslagzones zijn de tussenoplossing, plus een schatting.
             if FTP:
                 grenzen_w = [round(w) for w in power_zone_bounds(FTP)]
                 st.caption(
-                    f"FTP: **{FTP:.0f} W** (instellingen-tab) → zones (Coggan): "
+                    f"FTP: **{FTP:.0f} W** (instellingen-tab) → fietssessies "
+                    "worden op deze **vermogenszones** beoordeeld (Coggan): "
                     f"P1 <{grenzen_w[0]} · P2 {grenzen_w[0]}–{grenzen_w[1]} · "
                     f"P3 {grenzen_w[1]}–{grenzen_w[2]} · P4 {grenzen_w[2]}–{grenzen_w[3]} · "
-                    f"P5 {grenzen_w[3]}–{grenzen_w[4]} · P6 >{grenzen_w[4]} W."
+                    f"P5 {grenzen_w[3]}–{grenzen_w[4]} · P6 >{grenzen_w[4]} W. "
+                    f"Ritten zonder vermogen vallen terug op de fiets-LTHR "
+                    f"({bike_lthr(ATHLETE)} bpm)."
                 )
             else:
+                st.warning(
+                    "🔧 **Tussenoplossing:** er is nog geen FTP, dus "
+                    "fietssessies worden voorlopig beoordeeld op "
+                    f"hartslagzones rond de fiets-LTHR ({bike_lthr(ATHLETE)} "
+                    f"bpm; zone 2 = {BIKE_Z2[0]}–{BIKE_Z2[1]}). Vermogen wordt "
+                    "wel getoond, maar zonder zone-oordeel."
+                )
                 schatting = cache_ftp_estimate(DATA_VERSIE)
                 if schatting:
                     st.info(
@@ -1839,14 +2050,17 @@ with tab_fietsen:
                         f"{schatting['best20_watt']:.0f} W op "
                         f"{schatting['datum']:%d-%m-%Y}). Zet hem op de ⚙️ "
                         "Instellingen-tab om vermogenszones te krijgen — een "
-                        "echte FTP-test blijft nauwkeuriger dan deze schatting "
-                        "uit gewone trainingen."
+                        "echte ramptest op de Kickr blijft nauwkeuriger dan "
+                        "deze schatting uit gewone trainingen. Rijd je er een, "
+                        "dan herkent de 🔍 Sessie-tab hem en doet daar meteen "
+                        "een FTP-voorstel."
                     )
                 else:
                     st.caption(
-                        "Nog geen FTP ingesteld en nog geen rit met een vol "
-                        "20-minutenblok voor een schatting. Tot die tijd wordt "
-                        "het vermogen zonder zone-oordeel getoond."
+                        "Nog geen rit met een vol 20-minutenblok voor een "
+                        "schatting. Een ramptest op de Kickr wordt op de "
+                        "🔍 Sessie-tab automatisch herkend, met een "
+                        "FTP-voorstel ter bevestiging."
                     )
 
             # Bron als kleur: pedalen (buiten) en trainer (binnen) meten net
@@ -2497,7 +2711,7 @@ with tab_coach:
     if st.button("✨ Genereer nieuw advies (Anthropic API)"):
         try:
             with st.spinner("De coach kijkt naar je data..."):
-                generate_advice(router, conn, MEMORY_DIR)
+                generate_advice(router, conn, MEMORY_DIR, config)
             st.rerun()
         except Exception as e:
             st.error(str(e))
@@ -2519,8 +2733,10 @@ with tab_coach:
     if st.button("🔍 Analyseer trends (Anthropic API)"):
         try:
             with st.spinner("De coach zoekt naar patronen..."):
-                generate_insights(router, conn, MEMORY_DIR,
-                                  progress_text=progress_summary_text(conn, trainingen))
+                generate_insights(
+                    router, conn, MEMORY_DIR,
+                    progress_text=progress_summary_text(conn, trainingen),
+                    config=config)
             st.rerun()
         except Exception as e:
             st.error(str(e))
@@ -2545,7 +2761,9 @@ with tab_chat:
         bron = "Anthropic (cloud)" if escaleer else "Ollama (lokaal)"
         try:
             with st.spinner(f"Antwoord van {bron}..."):
-                antwoord = answer_question(router, conn, MEMORY_DIR, vraag, escalate=escaleer)
+                antwoord = answer_question(
+                    router, conn, MEMORY_DIR, vraag,
+                    escalate=escaleer, config=config)
         except Exception as e:
             antwoord = f"Er ging iets mis: {e}"
         st.chat_message("assistant").write(f"{antwoord}\n\n_— {bron}_")
@@ -2616,39 +2834,83 @@ with tab_settings:
         "Beschikbare tijd per sessie", str(config["athlete"].get("session_time", "")),
         help="Bijv.: 30-45 min doordeweeks, 1,5-2 uur zondag.")
 
-    st.subheader("❤️ Hartslag & zones")
-    c1, c2 = st.columns(2)
-    new_max_hr = c1.number_input("Maximale hartslag", 120, 230, int(config["athlete"]["max_hr"]))
-    new_lthr = c2.number_input("LTHR (drempelhartslag)", 100, 220, int(config["athlete"]["lthr"]))
-    preview = bounds_from_lthr(new_lthr, config["athlete"].get("zone_pct_lthr"))
+    st.subheader("🎯 Drempels per sport")
     st.caption(
-        f"Zones bij LTHR {new_lthr} (automatisch afgeleid, %LTHR): "
-        f"zone 1 < {preview[0]} · zone 2 {preview[0]}–{preview[1]} · "
-        f"zone 3 {preview[1]}–{preview[2]} · zone 4 {preview[2]}–{preview[3]} · "
-        f"zone 5 > {preview[3]}. Bij een LTHR-wijziging worden de zonetijden "
-        "van alle trainingen herrekend en komt er een regel bij in "
-        "memory/lthr_geschiedenis.md."
+        "Elke sport heeft een eigen drempel — ze zijn niet uitwisselbaar. "
+        "Hardlopen stuurt op hartslag (%LTHR), fietsen op vermogen (%FTP) "
+        "zodra dat kan, en zwemmen kent bewust geen zones. De maximale "
+        "hartslag blijft een los profielveld: de %max-methode is alleen een "
+        "terugval, %drempel is leidend."
+    )
+    new_max_hr = st.number_input(
+        "Maximale hartslag", 120, 230, int(config["athlete"]["max_hr"]),
+        help="Alleen terugval en referentie; de zones worden van de "
+             "sport-drempels afgeleid, niet hiervan.")
+
+    st.markdown("**🏃 Hardlopen — LTHR (drempelhartslag)**")
+    huidige_run_lthr = run_lthr(config["athlete"])
+    c1, c2 = st.columns([1, 2])
+    new_run_lthr = c1.number_input(
+        "Loop-LTHR (bpm)", 100, 220, huidige_run_lthr, key="run_lthr_input",
+        help="Garmin schat deze waarde automatisch tijdens hardlopen. Wat je "
+             "hier invult is de waarde die de app gebruikt — bevestig de "
+             "Garmin-schatting of overschrijf hem.")
+    new_run_source = c2.text_input(
+        "Herkomst van deze waarde", run_lthr_source(config["athlete"]) or "",
+        key="run_lthr_source_input",
+        help="Bijv. 'Garmin-schatting (bevestigd)' of 'veldtest 30 min'. "
+             "Puur documentatie; gaat mee in het profiel en de changelog.")
+    run_preview = bounds_from_lthr(new_run_lthr, config["athlete"].get("zone_pct_lthr"))
+    st.caption(
+        f"Loopzones bij LTHR {new_run_lthr} (%LTHR): "
+        f"zone 1 < {run_preview[0]} · zone 2 {run_preview[0]}–{run_preview[1] - 1} · "
+        f"zone 3 {run_preview[1]}–{run_preview[2] - 1} · "
+        f"zone 4 {run_preview[2]}–{run_preview[3] - 1} · "
+        f"zone 5 ≥ {run_preview[3]}."
     )
 
-    st.subheader("⚡ FTP (fietsvermogen)")
-    new_ftp = st.number_input(
-        "FTP in watt (0 = nog onbekend)", 0, 500,
-        int(config["athlete"].get("ftp") or 0),
+    st.markdown("**🚴 Fietsen — FTP (primair) en fiets-LTHR (secundair)**")
+    c1, c2 = st.columns(2)
+    new_ftp = c1.number_input(
+        "FTP in watt (0 = nog onbekend)", 0, 500, int(FTP or 0),
         help="Functional Threshold Power: het vermogen dat je ~een uur kunt "
-             "volhouden. De hartslagzones blijven gewoon bestaan; power komt "
-             "ernaast. Bij een wijziging worden de vermogenszone-tijden van "
-             "alle ritten met powerdata herrekend en komt de wijziging in de "
-             "changelog van doelen.md.",
+             "volhouden. Zodra dit is ingevuld worden fietssessies op "
+             "%FTP-vermogenszones (Coggan) beoordeeld in plaats van op "
+             "hartslag. Bij een wijziging worden de vermogenszone-tijden van "
+             "alle ritten met powerdata herrekend.")
+    new_bike_lthr = c2.number_input(
+        "Fiets-LTHR (bpm)", 100, 220, bike_lthr(config["athlete"]),
+        help="De drempelhartslag op de fiets, meestal 5–10 bpm lager dan bij "
+             "lopen. Wordt gebruikt zolang er geen FTP is, én voor ritten "
+             "zonder vermogensdata (oude sessies of een rit zonder Rally).")
+    bike_preview = bounds_from_lthr(new_bike_lthr, config["athlete"].get("zone_pct_lthr"))
+    st.caption(
+        f"Fiets-hartslagzones bij LTHR {new_bike_lthr} (%LTHR): "
+        f"zone 1 < {bike_preview[0]} · zone 2 {bike_preview[0]}–{bike_preview[1] - 1} · "
+        f"zone 3 {bike_preview[1]}–{bike_preview[2] - 1} · "
+        f"zone 4 {bike_preview[2]}–{bike_preview[3] - 1} · "
+        f"zone 5 ≥ {bike_preview[3]}."
     )
     if new_ftp:
         p_preview = [round(w) for w in power_zone_bounds(new_ftp)]
-        st.caption(
-            f"Vermogenszones bij FTP {new_ftp} W (Coggan): "
+        st.success(
+            f"Fietssessies met vermogen worden op de **vermogenszones** "
+            f"beoordeeld (Coggan, FTP {new_ftp} W): "
             f"P1 < {p_preview[0]} · P2 {p_preview[0]}–{p_preview[1]} · "
             f"P3 {p_preview[1]}–{p_preview[2]} · P4 {p_preview[2]}–{p_preview[3]} · "
-            f"P5 {p_preview[3]}–{p_preview[4]} · P6 > {p_preview[4]} W."
+            f"P5 {p_preview[3]}–{p_preview[4]} · P6 > {p_preview[4]} W. "
+            "Ritten zonder vermogen vallen terug op de fiets-hartslagzones "
+            "hierboven."
         )
     else:
+        st.warning(
+            "🔧 **Tussenoplossing:** zonder FTP worden álle fietssessies op de "
+            f"fiets-hartslagzones (LTHR {new_bike_lthr}) beoordeeld. Doe een "
+            "ramptest op de Kickr — het dashboard herkent die op de "
+            "🔍 Sessie-tab en stelt de FTP dan ter bevestiging voor "
+            f"({RAMP_FTP_FACTOR:.0%} van je beste minuut)."
+        )
+    if not new_ftp:
         ftp_hint = cache_ftp_estimate(DATA_VERSIE)
         if ftp_hint:
             st.caption(
@@ -2664,6 +2926,15 @@ with tab_settings:
                 "Nog geen FTP en nog geen rit met een vol 20-minutenblok voor "
                 "een schatting — vermogen wordt zonder zone-oordeel getoond."
             )
+
+    st.markdown("**🏊 Zwemmen — geen drempel, geen zones**")
+    st.caption(
+        "Bewuste keuze: polshartslag onder water is onbetrouwbaar en de "
+        "techniek is nog in opbouw. Zwemsessies krijgen nergens een "
+        "zone-oordeel; er wordt op afstand, tempo per 100 m, slagritme en "
+        "SWOLF gestuurd. De CSS (kritische zwemsnelheid) staat daar los naast "
+        "als referentie op de 🏊 Zwemmen-tab."
+    )
 
     st.subheader("🤖 LLM")
     c1, c2, c3 = st.columns(3)
@@ -2697,8 +2968,11 @@ with tab_settings:
             if str(r["name"]).strip() and pd.notna(r["date"])
         ]
         new_config["athlete"]["max_hr"] = new_max_hr
-        new_config["athlete"]["lthr"] = new_lthr
-        new_config["athlete"]["ftp"] = int(new_ftp) or None
+        # Drempels per sport in één keer wegschrijven (wist meteen de oude
+        # platte lthr/ftp-velden, zodat er één bron van waarheid is).
+        set_thresholds(new_config["athlete"], new_run_lthr, new_bike_lthr,
+                       int(new_ftp) or None,
+                       run_lthr_source_value=new_run_source.strip() or None)
         new_config["athlete"]["training_days"] = new_training_days.strip()
         new_config["athlete"]["session_time"] = new_session_time.strip()
         new_config["athlete"].pop("zone_bounds", None)  # zones komen nu uit %LTHR
@@ -2713,20 +2987,41 @@ with tab_settings:
             MEMORY_DIR, config, new_config, note="instellingen-tab")
 
         meldingen = []
-        if new_lthr != int(config["athlete"]["lthr"]):
-            lthr_append(MEMORY_DIR, new_lthr, "Aangepast via instellingen-tab")
-            n = recompute_zones(conn, preview)
+        # Eén herberekening dekt beide hartslagdrempels: recompute_zones pakt
+        # per sessie de grenzen van háár eigen sport, dus na een wijziging
+        # staat de hele historie weer op één definitie.
+        hr_gewijzigd = []
+        for naam, oud, nieuw, soort in (
+                ("loop-LTHR", run_lthr(config["athlete"]), new_run_lthr, LTHR_RUN),
+                ("fiets-LTHR", bike_lthr(config["athlete"]), new_bike_lthr, LTHR_BIKE)):
+            if oud != nieuw:
+                hr_gewijzigd.append((naam, oud, nieuw))
+                lthr_append(MEMORY_DIR, nieuw,
+                            f"Aangepast via instellingen-tab (was {oud})",
+                            kind=soort)
+        if hr_gewijzigd:
+            n = recompute_zones(conn, new_config["athlete"])
+            omschrijving = " en ".join(
+                f"{naam} {oud} → {nieuw}" for naam, oud, nieuw in hr_gewijzigd)
             meldingen.append(
-                f"nieuwe LTHR {new_lthr} vastgelegd in de geschiedenis; "
+                f"{omschrijving} vastgelegd in de drempelgeschiedenis; "
                 f"zonetijden van {n} trainingen herrekend"
             )
         # FTP gezet, gewijzigd of gewist: de vermogenszone-tijden van alle
-        # ritten met powerdata herrekenen (wissen = netjes terugvallen op
-        # "geen zone-oordeel"); de changelog in doelen.md legt de wijziging vast.
-        if (int(new_ftp) or None) != (config["athlete"].get("ftp") or None):
-            n_pw = recompute_power_zones(conn, int(new_ftp) or None)
+        # ritten met powerdata herrekenen (wissen = netjes terugvallen op de
+        # fiets-hartslagzones); de changelog in doelen.md legt de wijziging vast.
+        nieuwe_ftp = int(new_ftp) or None
+        if nieuwe_ftp != (int(FTP) if FTP else None):
+            n_pw = recompute_power_zones(conn, nieuwe_ftp)
+            if nieuwe_ftp:
+                lthr_append(MEMORY_DIR, nieuwe_ftp,
+                            "Ingevuld via instellingen-tab", kind=LTHR_BIKE_FTP)
+                log_ftp_determination(
+                    MEMORY_DIR, float(nieuwe_ftp),
+                    "handmatig ingevuld op de instellingenpagina",
+                    note="Niet uit een herkende test afgeleid.")
             meldingen.append(
-                f"FTP {'gewist' if not new_ftp else f'op {new_ftp} W gezet'}; "
+                f"FTP {'gewist' if not nieuwe_ftp else f'op {nieuwe_ftp} W gezet'}; "
                 f"vermogenszones van {n_pw} ritten herrekend"
             )
         if meldingen:

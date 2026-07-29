@@ -28,8 +28,9 @@ from tricoach.storage import (
 )
 from tricoach.trainingslog import append_entry
 from tricoach.transport import suggest_transport
+from tricoach.sportzones import ftp as athlete_ftp, hr_zone_bounds
 from tricoach.weather import WindData
-from tricoach.zones import time_in_zones, zone_bounds
+from tricoach.zones import time_in_zones
 
 # Een functie die op basis van een sessie een observatie-tekst maakt
 # (vanaf stap 5 is dit het lokale Ollama-model). Mag None zijn.
@@ -98,8 +99,8 @@ def import_zip(
     voor duplicaten en verwijderde sessies: elk aangeleverd origineel blijft
     bewaard, byte-identieke heruploads leveren geen nieuwe versie op.
     """
-    bounds = zone_bounds(config["athlete"])
-    ftp = config["athlete"].get("ftp") or None
+    athlete = config["athlete"]
+    ftp = athlete_ftp(athlete)
     note = (user_note or "").strip() or None
     label = (training_label or "").strip() or None
     results = []
@@ -120,6 +121,9 @@ def import_zip(
                                         archived=archived))
             continue
 
+        # De zonegrenzen zijn sport-afhankelijk: hardlopen op de loop-LTHR,
+        # fietsen op de fiets-LTHR, zwemmen zonder zones (None).
+        bounds = hr_zone_bounds(athlete, act.sport)
         tiz = time_in_zones(act.records, bounds) if not act.records.empty else {}
         observation = observation_fn(act, tiz) if observation_fn else None
         wind = weather_fn(act) if weather_fn else None

@@ -20,7 +20,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
-from tricoach import body, profile as profile_mod
+from tricoach import body, profile as profile_mod, sportzones
 from tricoach.config import load_config
 from tricoach.feedback import (
     _parse_reply,
@@ -119,16 +119,22 @@ def test_profile(tmp: Path):
     shutil.copy("memory/doelen.md", mem / "doelen.md")
 
     import copy
+    oud_lthr = sportzones.run_lthr(CONFIG["athlete"])
     new = copy.deepcopy(CONFIG)
-    new["athlete"]["lthr"] = 174
+    sportzones.set_thresholds(new["athlete"], 174,
+                              sportzones.bike_lthr(CONFIG["athlete"]),
+                              sportzones.ftp(CONFIG["athlete"]))
     new["athlete"]["training_days"] = "ma/wo/vr/zo"
 
     changes = profile_mod.update_doelen(mem, CONFIG, new, note="test")
-    assert any("LTHR" in c for c in changes), changes
+    assert any("LTHR hardlopen" in c for c in changes), changes
     doelen = (mem / "doelen.md").read_text(encoding="utf-8")
     assert profile_mod.START in doelen and profile_mod.END in doelen
-    assert "Wijzigingslog" in doelen and "171 → 174" in doelen
+    assert "Wijzigingslog" in doelen and f"{oud_lthr} → 174" in doelen
     assert "# Doelen & Voorkeuren" in doelen  # handgeschreven inhoud behouden
+    # Het profielblok noemt de drempels én de zone-indeling per sport.
+    assert "Drempel hardlopen (LTHR):** 174" in doelen
+    assert "Zone-indeling per sport" in doelen and "Zwemmen" in doelen
 
     # Tweede wijziging: changelog groeit, blok blijft uniek.
     new2 = copy.deepcopy(new)
@@ -136,8 +142,8 @@ def test_profile(tmp: Path):
     profile_mod.update_doelen(mem, new, new2, note="test2")
     doelen = (mem / "doelen.md").read_text(encoding="utf-8")
     assert doelen.count(profile_mod.START) == 1
-    assert "193 → 195" in doelen and "171 → 174" in doelen
-    print("OK  profile (beheerd blok + changelog, idempotent)")
+    assert "193 → 195" in doelen and f"{oud_lthr} → 174" in doelen
+    print("OK  profile (beheerd blok + changelog per sport, idempotent)")
 
 
 def test_schedule(tmp: Path):

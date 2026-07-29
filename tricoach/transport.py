@@ -26,8 +26,8 @@ import pandas as pd
 
 from tricoach.fit_parser import ParsedActivity
 from tricoach.removal import note_in_trainingslog
+from tricoach.sportzones import CYCLING, hr_zone_bounds
 from tricoach.storage import set_excluded_reason
-from tricoach.zones import zone_bounds
 
 # De ene uitsluitingsreden die de UI nu kent; het kolomtype laat ruimte voor
 # latere redenen (bijv. "test" of "materiaalcheck").
@@ -50,18 +50,21 @@ def suggest_transport(act: ParsedActivity, config: dict) -> bool:
 
     Criteria: een fietsrit buiten, korter dan ~10 km, met een gemiddelde
     hartslag onder de zone 2-ondergrens — dus onder trainingsintensiteit.
-    Een echte woon-werkrit in zone 2 (37 km) valt af op de afstand; een
-    korte harde intervalrit valt af op de hartslag. Zonder hartslagdata
-    geen suggestie: dan valt er niets te beoordelen.
+    Die ondergrens komt van de **fiets**-LTHR, niet van de loop-LTHR: op de
+    fiets ligt de drempel lager, en met de loopgrens zou een rustig ritje net
+    boven de suggestiedrempel uitkomen. Een echte woon-werkrit in zone 2
+    (37 km) valt af op de afstand; een korte harde intervalrit valt af op de
+    hartslag. Zonder hartslagdata geen suggestie: dan valt er niets te
+    beoordelen.
     """
-    if act.sport != "cycling" or act.is_indoor:
+    if act.sport != CYCLING or act.is_indoor:
         return False
     if not act.distance_m or act.distance_m >= MAX_TRANSPORT_KM * 1000:
         return False
     avg_hr = act.summary.get("avg_heart_rate")
     if not avg_hr:
         return False
-    z2_onder = zone_bounds(config["athlete"])[0]
+    z2_onder = hr_zone_bounds(config["athlete"], CYCLING)[0]
     return avg_hr < z2_onder
 
 

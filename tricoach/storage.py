@@ -35,7 +35,7 @@ from tricoach.power import (
     time_in_power_zones,
 )
 from tricoach.timebasis import active_seconds
-from tricoach.zones import ZONE_NAMES, pct_in_zone2, time_in_zones
+from tricoach.zones import pct_in_zone2, time_in_zones
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS activities (
@@ -321,13 +321,19 @@ def is_deleted(conn: sqlite3.Connection, activity_key: str) -> bool:
 def save_activity(
     conn: sqlite3.Connection,
     act: ParsedActivity,
-    zone_bounds: list[int],
+    zone_bounds: list[int] | None,
     user_note: str | None = None,
     wind: "WindData | None" = None,
     training_label: str | None = None,
     ftp: float | None = None,
 ) -> bool:
     """Sla één activiteit op. Geeft False terug als hij al bestond (dedup).
+
+    ``zone_bounds`` zijn de hartslagzonegrenzen die vóór déze sport gelden —
+    de aanroeper haalt ze op met
+    :func:`tricoach.sportzones.hr_zone_bounds`, want de drempel verschilt per
+    sport. ``None`` betekent "geen zone-oordeel" (zwemmen): de z1..z5-kolommen
+    blijven dan op 0 en ``pct_in_zone2`` op NULL.
 
     ``user_note`` is de vrije opmerking die de gebruiker bij de upload typte
     (optioneel). ``wind`` is de automatisch opgehaalde Open-Meteo-winddata
@@ -341,11 +347,7 @@ def save_activity(
         return False
 
     s = act.summary
-    tiz = (
-        time_in_zones(act.records, zone_bounds)
-        if not act.records.empty and "heart_rate" in act.records
-        else dict.fromkeys(ZONE_NAMES, 0)
-    )
+    tiz = time_in_zones(act.records, zone_bounds)
     # Tempo/snelheid op actieve tijd (zie tricoach.timebasis): rust aan de
     # kant en stilstand tellen niet mee. Terugval op het Garmin-veld als de
     # afstand of actieve tijd ontbreekt.
@@ -690,27 +692,35 @@ def load_records(conn: sqlite3.Connection, activity_key: str) -> pd.DataFrame:
     return df
 
 
-def recompute_zones(conn: sqlite3.Connection, zone_bounds: list[int]) -> int:
+def recompute_zones(conn: sqlite3.Connection, athlete: dict) -> int:
     """Herreken de tijd-in-zones én de afgeleide maten van álle activiteiten.
 
-    Nodig wanneer de LTHR (en dus de zones) wijzigt: de z1_s..z5_s-kolommen
+    Nodig wanneer een drempel (en dus de zones) wijzigt: de z1_s..z5_s-kolommen
     en het daaruit afgeleide ``pct_in_zone2`` zijn bij import berekend met de
-    toenmalige grenzen. ``aerobic_efficiency`` hangt niet van de zones af, maar
-    wordt hier meegenomen zodat één herberekening alle gecachete maten dekt
-    (bijv. ook handig om een bestaande database eenmalig te vullen). De
-    seconde-data staat in ``records``, dus herrekenen kan altijd. Geeft het
-    aantal bijgewerkte activiteiten terug.
+    toenmalige grenzen. Elke sessie wordt herrekend met de grenzen van háár
+    eigen sport (zie :func:`tricoach.sportzones.hr_zone_bounds`) — hardlopen op
+    de loop-LTHR, fietsen op de fiets-LTHR, zwemmen zonder zones. Zo blijven
+    trends over de hele historie op één definitie staan in plaats van
+    halverwege om te schakelen.
+
+    ``aerobic_efficiency`` hangt niet van de zones af, maar wordt hier
+    meegenomen zodat één herberekening alle gecachete maten dekt (bijv. ook
+    handig om een bestaande database eenmalig te vullen). De seconde-data staat
+    in ``records``, dus herrekenen kan altijd. Geeft het aantal bijgewerkte
+    activiteiten terug.
     """
+    from tricoach.sportzones import hr_zone_bounds  # hier tegen een circulaire import
+
+    # Grenzen per sport één keer bepalen; dat scheelt werk per sessie.
+    bounds_per_sport: dict[str, list[int] | None] = {}
     rows = conn.execute(
         "SELECT activity_key, sport, avg_speed_ms, avg_hr FROM activities"
     ).fetchall()
     for key, sport, avg_speed_ms, avg_hr in rows:
+        if sport not in bounds_per_sport:
+            bounds_per_sport[sport] = hr_zone_bounds(athlete, sport)
         records = load_records(conn, key)
-        tiz = (
-            time_in_zones(records, zone_bounds)
-            if not records.empty and "heart_rate" in records
-            else dict.fromkeys(ZONE_NAMES, 0)
-        )
+        tiz = time_in_zones(records, bounds_per_sport[sport])
         pct_z2 = pct_in_zone2(tiz["Z1"], tiz["Z2"], tiz["Z3"], tiz["Z4"], tiz["Z5"])
         eff = aerobic_efficiency(sport, avg_speed_ms, avg_hr)
         conn.execute(

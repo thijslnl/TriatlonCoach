@@ -1,8 +1,12 @@
-"""Hartslagzone-berekeningen op basis van de %LTHR-zones uit config.yaml.
+"""Hartslagzone-berekeningen op basis van %LTHR.
 
-De zonegrenzen komen uit config["athlete"]["zone_bounds"]: een lijst met de
-ondergrens van Z2 t/m Z5. Alles onder de eerste grens is Z1, alles vanaf de
-laatste grens is Z5.
+De zonegrenzen zijn een lijst met de ondergrens van Z2 t/m Z5: alles onder de
+eerste grens is Z1, alles vanaf de laatste grens is Z5.
+
+Deze module rekent alleen; wélke drempel erin gaat is sport-afhankelijk en
+wordt door :mod:`tricoach.sportzones` bepaald (loop-LTHR voor hardlopen,
+fiets-LTHR voor fietsen, geen zones voor zwemmen). Vraag de grenzen daar op
+met ``hr_zone_bounds(athlete, sport)`` in plaats van ze zelf af te leiden.
 """
 
 import pandas as pd
@@ -10,21 +14,13 @@ import pandas as pd
 ZONE_NAMES = ["Z1", "Z2", "Z3", "Z4", "Z5"]
 
 # Ondergrens van Z2 t/m Z5 als fractie van de LTHR (standaard %LTHR-indeling).
-# Met LTHR 171 geeft dit 137 / 152 / 162 / 171 — de zones uit het intakegesprek.
+# Met de loop-LTHR van 164 geeft dit 131 / 146 / 156 / 164.
 DEFAULT_ZONE_PCT = [0.80, 0.89, 0.95, 1.00]
 
 
 def bounds_from_lthr(lthr: int, pcts: list[float] | None = None) -> list[int]:
     """Reken de zonegrenzen uit op basis van de LTHR."""
     return [round(lthr * p) for p in (pcts or DEFAULT_ZONE_PCT)]
-
-
-def zone_bounds(athlete: dict) -> list[int]:
-    """Zonegrenzen uit de athlete-config: afgeleid van LTHR (%LTHR) als
-    ``zone_pct_lthr`` aanwezig is, anders de vaste ``zone_bounds``-lijst."""
-    if "zone_pct_lthr" in athlete:
-        return bounds_from_lthr(athlete["lthr"], athlete["zone_pct_lthr"])
-    return athlete["zone_bounds"]
 
 # Records liggen normaal ~1 seconde uit elkaar. Bij grotere gaten (pauze,
 # signaalverlies) tellen we maximaal dit aantal seconden mee, zodat een
@@ -41,13 +37,19 @@ def zone_for_hr(hr: int, bounds: list[int]) -> str:
     return ZONE_NAMES[min(zone, len(ZONE_NAMES) - 1)]
 
 
-def time_in_zones(records: pd.DataFrame, bounds: list[int]) -> dict[str, int]:
+def time_in_zones(records: pd.DataFrame, bounds: list[int] | None) -> dict[str, int]:
     """Bereken seconden per hartslagzone uit de record-data van een sessie.
 
     Verwacht een DataFrame met kolommen 'timestamp' en 'heart_rate'.
     Geeft een dict terug zoals {"Z1": 120, "Z2": 1800, ...}.
+
+    ``bounds=None`` betekent "deze sport krijgt geen zone-oordeel" (zwemmen):
+    alle zones blijven dan op 0, zodat er nergens per ongeluk toch een
+    zoneverdeling opduikt.
     """
     result = dict.fromkeys(ZONE_NAMES, 0)
+    if bounds is None or records.empty or "heart_rate" not in records:
+        return result
     df = records.dropna(subset=["heart_rate"]).sort_values("timestamp")
     if len(df) < 2:
         return result

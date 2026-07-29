@@ -1,0 +1,290 @@
+"""Tests voor de sport-afhankelijke drempels, zones en de FTP-afleiding.
+
+Draaien vanuit de projectroot::
+
+    python tests/test_sportzones.py
+
+Loopt de verificatiepunten van de uitbreiding langs:
+
+1. loop-LTHR 164 → de zonegrenzen uit de opdracht (Z2 131–146, Z3 146–156,
+   Z4 156–164, Z5 >164) en een easy run op HR 143–147 die nu op de grens
+   van Z2/Z3 valt;
+2. FTP leeg → fietssessies op fiets-LTHR-hartslagzones, gemarkeerd als
+   tussenoplossing;
+3. FTP ingevuld → fietssessies op %FTP-vermogenszones (Coggan);
+4. zwemmen krijgt nergens een zone-oordeel;
+5. de herberekening zet elke sport op zijn eigen drempel;
+6. een ramptest wordt herkend en levert een FTP-voorstel (75% van de beste
+   minuut), een duurrit niet.
+"""
+
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pandas as pd
+
+from tricoach.config import normalize_athlete
+from tricoach.fit_parser import ParsedActivity
+from tricoach.lthr import BIKE_FTP, RUN_LTHR, append_entry, load_history
+from tricoach.ramptest import RAMP_FTP_FACTOR, ftp_proposal, is_ramp_test
+from tricoach.sportzones import (
+    CYCLING,
+    METHOD_HR,
+    METHOD_NONE,
+    METHOD_POWER,
+    RUNNING,
+    SWIMMING,
+    bike_lthr,
+    hr_zone_bounds,
+    run_lthr,
+    zone2_range,
+    zone_model,
+)
+from tricoach.storage import connect, recompute_zones, save_activity
+from tricoach.zones import time_in_zones, zone_for_hr
+
+# De athlete-config zoals hij na de herijking in config.yaml staat.
+ATHLETE = {
+    "max_hr": 193,
+    "zone_pct_lthr": [0.80, 0.89, 0.95, 1.00],
+    "thresholds": {
+        "running": {"lthr": 164, "lthr_source": "Garmin-schatting (bevestigd)"},
+        "cycling": {"lthr": 156, "ftp": None},
+    },
+}
+
+
+def _records(start: datetime, hrs: list[int] | None = None,
+             watts: list[float] | None = None) -> pd.DataFrame:
+    """Seconde-data met één meetpunt per seconde."""
+    n = len(hrs if hrs is not None else watts)
+    data = {"timestamp": [start + timedelta(seconds=i) for i in range(n)]}
+    if hrs is not None:
+        data["heart_rate"] = hrs
+    if watts is not None:
+        data["power"] = watts
+    return pd.DataFrame(data)
+
+
+def _activity(sport: str, start: datetime, records: pd.DataFrame,
+              sub_sport: str | None = None) -> ParsedActivity:
+    return ParsedActivity(
+        activity_key=f"{sport}-{start:%Y%m%d%H%M%S}",
+        sport=sport,
+        sub_sport=sub_sport,
+        start_time=start,
+        summary={"total_timer_time": float(len(records)),
+                 "total_distance": 5000.0,
+                 "avg_heart_rate": 145},
+        records=records,
+        lengths=pd.DataFrame(),
+        source_file="test.fit",
+    )
+
+
+# --------------------------------------------------------------------------
+
+def test_loop_zones_164():
+    """Loop-LTHR 164 geeft precies de grenzen uit de opdracht."""
+    assert run_lthr(ATHLETE) == 164
+    bounds = hr_zone_bounds(ATHLETE, RUNNING)
+    assert bounds == [131, 146, 156, 164], bounds
+
+    # De grenzen uit de opdracht: Z2 131-146, Z3 146-156, Z4 156-164, Z5 >164.
+    assert zone_for_hr(130, bounds) == "Z1"
+    assert zone_for_hr(131, bounds) == "Z2"
+    assert zone_for_hr(145, bounds) == "Z2"
+    assert zone_for_hr(146, bounds) == "Z3"
+    assert zone_for_hr(155, bounds) == "Z3"
+    assert zone_for_hr(156, bounds) == "Z4"
+    assert zone_for_hr(163, bounds) == "Z4"
+    assert zone_for_hr(164, bounds) == "Z5"
+    assert zone_for_hr(175, bounds) == "Z5"
+
+    # Easy runs op 143-147 liggen nu rond het Z2-plafond: 143-145 nog Z2,
+    # 146-147 al Z3 — precies de herijking die de opdracht beschrijft.
+    assert [zone_for_hr(hr, bounds) for hr in (143, 144, 145, 146, 147)] == \
+        ["Z2", "Z2", "Z2", "Z3", "Z3"]
+
+    # Met de oude LTHR van 171 zou 147 nog ruim in Z2 hebben gezeten.
+    oude_bounds = [137, 152, 162, 171]
+    assert zone_for_hr(147, oude_bounds) == "Z2"
+    print("1. loop-LTHR 164 → Z2 131–145 · Z3 146–155 · Z4 156–163 · Z5 164+; "
+          "easy run 143–147 valt nu op de Z2/Z3-grens (was volledig Z2): OK")
+
+
+def test_fiets_zonder_ftp_is_tussenoplossing():
+    """Zonder FTP: hartslagzones op de fiets-LTHR, expliciet als tussenoplossing."""
+    assert bike_lthr(ATHLETE) == 156
+    model = zone_model(ATHLETE, CYCLING)
+    assert model.method == METHOD_HR
+    assert model.provisional is True
+    assert "tussenoplossing" in model.reason
+    assert model.threshold == 156
+    assert hr_zone_bounds(ATHLETE, CYCLING) == [125, 139, 148, 156]
+    assert zone2_range(ATHLETE, CYCLING) == (125, 138)
+
+    # De fiets-drempel ligt binnen de gebruikelijke 5-10 bpm onder de loop-LTHR.
+    assert 5 <= run_lthr(ATHLETE) - bike_lthr(ATHLETE) <= 10
+    print(f"2. FTP leeg → fiets op %LTHR {model.threshold} "
+          f"({model.bounds_text()}), gemarkeerd als tussenoplossing: OK")
+
+
+def test_fiets_met_ftp_is_vermogen():
+    """Met FTP: Coggan-vermogenszones zijn primair; ritten zonder power vallen terug."""
+    met_ftp = {**ATHLETE, "thresholds": {
+        "running": {"lthr": 164}, "cycling": {"lthr": 156, "ftp": 240}}}
+    model = zone_model(met_ftp, CYCLING)
+    assert model.method == METHOD_POWER
+    assert model.provisional is False
+    assert model.threshold == 240
+    # Coggan: 55/75/90/105/120% van 240 W.
+    assert [round(w) for w in model.bounds] == [132, 180, 216, 252, 288]
+
+    # Een rit zonder vermogensdata valt terug op de fiets-hartslagzones, maar
+    # dat is geen "tussenoplossing" — de instelling klopt, de rit mist de data.
+    zonder_power = zone_model(met_ftp, CYCLING, has_power=False)
+    assert zonder_power.method == METHOD_HR
+    assert zonder_power.threshold == 156
+    assert zonder_power.provisional is False
+    assert "geen vermogensdata" in zonder_power.reason
+    print(f"3. FTP 240 W → {model.bounds_text()}; rit zonder power valt terug "
+          "op de fiets-LTHR: OK")
+
+
+def test_zwemmen_krijgt_geen_zones():
+    """Zwemmen heeft geen drempel, geen grenzen en geen zonetijd."""
+    model = zone_model(ATHLETE, SWIMMING)
+    assert model.method == METHOD_NONE
+    assert model.has_zones is False
+    assert model.threshold is None
+    assert model.bounds_text() == "—"
+    assert hr_zone_bounds(ATHLETE, SWIMMING) is None
+    assert zone2_range(ATHLETE, SWIMMING) is None
+
+    # Ook met hartslagdata blijft de zonetijd leeg.
+    rec = _records(datetime(2026, 7, 20, 6, 0), hrs=[150] * 600)
+    tiz = time_in_zones(rec, None)
+    assert sum(tiz.values()) == 0, tiz
+    print("4. zwemmen: geen drempel, geen grenzen, geen zonetijd: OK")
+
+
+def test_herberekening_per_sport(tmp: Path):
+    """recompute_zones zet elke sessie op de drempel van háár eigen sport."""
+    conn = connect(tmp / "zones.db")
+    start = datetime(2026, 7, 20, 6, 0)
+
+    # Drie sessies, alle drie 10 minuten op HR 143 — een hartslag die per sport
+    # in een andere zone valt: loop Z2 (131-145), fiets Z3 (139-147).
+    loop = _activity(RUNNING, start, _records(start, hrs=[143] * 600))
+    rit = _activity(CYCLING, start + timedelta(hours=2),
+                    _records(start + timedelta(hours=2), hrs=[143] * 600))
+    zwem = _activity(SWIMMING, start + timedelta(hours=4),
+                     _records(start + timedelta(hours=4), hrs=[143] * 600))
+
+    # Bewust met de VERKEERDE (oude, uniforme) grenzen opgeslagen, zodat de
+    # herberekening echt iets te corrigeren heeft.
+    oud = [137, 152, 162, 171]
+    for act in (loop, rit, zwem):
+        assert save_activity(conn, act, oud)
+    voor = dict(conn.execute(
+        "SELECT sport, z2_s FROM activities").fetchall())
+    assert voor[RUNNING] > 0 and voor[CYCLING] > 0 and voor[SWIMMING] > 0
+
+    n = recompute_zones(conn, ATHLETE)
+    assert n == 3, n
+    na = {sport: rij for sport, *rij in conn.execute(
+        "SELECT sport, z1_s, z2_s, z3_s, z4_s, z5_s, pct_in_zone2 "
+        "FROM activities").fetchall()}
+
+    # Hardlopen: HR 143 zit in Z2 (131-145).
+    assert na[RUNNING][1] > 0 and na[RUNNING][2] == 0, na[RUNNING]
+    # Fietsen: dezelfde HR 143 zit in Z3 (139-147) — eigen, lagere drempel.
+    assert na[CYCLING][2] > 0 and na[CYCLING][1] == 0, na[CYCLING]
+    # Zwemmen: alles leeg, geen percentage.
+    assert sum(na[SWIMMING][:5]) == 0, na[SWIMMING]
+    assert na[SWIMMING][5] is None, na[SWIMMING]
+    conn.close()
+    print("5. herberekening: HR 143 → loop Z2, fiets Z3, zwemmen geen zones; "
+          "zwem-percentage gewist: OK")
+
+
+def test_ramptest_en_ftp_voorstel():
+    """Een oplopend blokkig indoorprofiel is een ramptest; een duurrit niet."""
+    start = datetime(2026, 8, 1, 19, 0)
+    # Ramptest: 12 trappen van 60 s, 100 W → 320 W in stappen van 20 W.
+    watts = []
+    for stap in range(12):
+        watts += [100 + stap * 20] * 60
+    rec = _records(start, watts=watts)
+
+    assert is_ramp_test(rec, indoor=True) is True
+    assert is_ramp_test(rec, indoor=False) is False, "buiten is geen ramptest"
+
+    voorstel = ftp_proposal(rec, indoor=True)
+    assert voorstel is not None
+    assert voorstel.factor == RAMP_FTP_FACTOR
+    assert voorstel.confidence == "hoog"
+    # Beste minuut is de laatste trap (320 W); 75% daarvan is 240 W.
+    assert abs(voorstel.basis_watt - 320) < 5, voorstel.basis_watt
+    assert abs(voorstel.ftp_watt - 240) < 5, voorstel.ftp_watt
+
+    # Een vlakke duurrit van een uur is geen test en levert geen voorstel op.
+    duur = _records(start, watts=[180.0] * 3600)
+    assert is_ramp_test(duur, indoor=True) is False
+    assert ftp_proposal(duur, indoor=True) is None
+    print(f"6. ramptest herkend → FTP-voorstel {voorstel.ftp_watt:.0f} W "
+          f"({voorstel.basis_watt:.0f} W × {RAMP_FTP_FACTOR:.0%}); "
+          "duurrit levert geen voorstel: OK")
+
+
+def test_config_migratie_en_geschiedenis(tmp: Path):
+    """Oude platte config migreert; de drempelgeschiedenis splitst per sport."""
+    oud = {"max_hr": 193, "lthr": 171, "ftp": None,
+           "zone_pct_lthr": [0.8, 0.89, 0.95, 1.0]}
+    normalize_athlete(oud)
+    assert "lthr" not in oud and "ftp" not in oud
+    assert oud["thresholds"]["running"]["lthr"] == 171
+    assert oud["thresholds"]["cycling"]["lthr"] == 163  # 171 - 8
+    # Idempotent: nog eens draaien verandert niets.
+    kopie = {k: v for k, v in oud.items()}
+    normalize_athlete(kopie)
+    assert kopie == oud
+
+    # Geschiedenis: de oude 3-koloms vorm wordt gelezen als loop-LTHR en er
+    # kan een FTP-regel naast staan zonder dat die de loopgrafiek vervuilt.
+    mem = tmp / "mem"
+    mem.mkdir()
+    (mem / "lthr_geschiedenis.md").write_text(
+        "# LTHR-geschiedenis\n\n| Datum | LTHR | Opmerking |\n|---|---|---|\n"
+        "| 2026-06-12 | 171 | Startwaarde |\n", encoding="utf-8")
+    append_entry(mem, 164, "Herijking op de Garmin-schatting", kind=RUN_LTHR)
+    append_entry(mem, 240, "Ramptest op de Kickr", kind=BIKE_FTP)
+
+    loop_hist = load_history(mem, 164, kind=RUN_LTHR)
+    assert list(loop_hist["waarde"]) == [171, 164], list(loop_hist["waarde"])
+    ftp_hist = load_history(mem, 164, kind=BIKE_FTP)
+    assert list(ftp_hist["waarde"]) == [240]
+    print("7. oude config migreert (idempotent); drempelgeschiedenis gesplitst "
+          "per sport, oude regels gelden als loop-LTHR: OK")
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="tricoach_sportzones_") as d:
+        tmp = Path(d)
+        test_loop_zones_164()
+        test_fiets_zonder_ftp_is_tussenoplossing()
+        test_fiets_met_ftp_is_vermogen()
+        test_zwemmen_krijgt_geen_zones()
+        test_herberekening_per_sport(tmp)
+        test_ramptest_en_ftp_voorstel()
+        test_config_migratie_en_geschiedenis(tmp)
+    print("\nAlle sportzone-tests geslaagd ✓")
+
+
+if __name__ == "__main__":
+    main()

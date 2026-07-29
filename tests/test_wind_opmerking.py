@@ -26,7 +26,7 @@ from tricoach.storage import connect, load_activities, save_activity
 from tricoach.trainingslog import append_entry
 from tricoach import weather
 from tricoach.weather import WindData, wind_for_activity
-from tricoach.zones import zone_bounds
+from tricoach.sportzones import hr_zone_bounds
 
 CONFIG = load_config()
 
@@ -150,7 +150,7 @@ def test_wind_live(tmp: Path):
 
 def test_storage_note_and_wind(tmp: Path):
     conn = connect(tmp / "s.db")
-    bounds = zone_bounds(CONFIG["athlete"])
+    bounds = hr_zone_bounds(CONFIG["athlete"], "cycling")
     wind = WindData(speed_kmh=24.0, direction_deg=210.0, gusts_kmh=38.0)
     assert save_activity(conn, _bike_activity(), bounds,
                          user_note="meewind heen, tegenwind terug", wind=wind)
@@ -180,7 +180,7 @@ def test_trainingslog_note_and_wind(tmp: Path):
 def test_feedback_weegt_context_mee(tmp: Path):
     mem = tmp / "m_fb"; mem.mkdir()
     conn = connect(tmp / "f.db")
-    bounds = zone_bounds(CONFIG["athlete"])
+    bounds = hr_zone_bounds(CONFIG["athlete"], "cycling")
     wind = WindData(speed_kmh=26.0, direction_deg=225.0, gusts_kmh=40.0)
     act = _bike_activity()
     save_activity(conn, act, bounds, user_note="tegenwind op de terugweg", wind=wind)

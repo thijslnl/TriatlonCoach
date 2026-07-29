@@ -1,12 +1,16 @@
 """Profielwaarden spiegelen naar memory/doelen.md (bron van waarheid) + changelog.
 
-De technische waarden (max HR, LTHR, %LTHR-zones) blijven in ``config.yaml``,
-omdat de hele app daar al op draait (zone-berekening, herrekening bij een
-LTHR-wijziging, enz.). Maar de gebruiker beheert zijn profiel op de
-instellingenpagina, en ``doelen.md`` is de leesbare bron die in álle advies- en
-feedback-prompts meegaat. Daarom houden we in ``doelen.md`` een door het
-dashboard beheerd profielblok bij, plus een changelog die élke wijziging
-vastlegt — zo blijven eerdere zones reproduceerbaar.
+De technische waarden (max HR, de drempels per sport, %LTHR-zones) blijven in
+``config.yaml``, omdat de hele app daar al op draait (zone-berekening,
+herrekening bij een drempelwijziging, enz.). Maar de gebruiker beheert zijn
+profiel op de instellingenpagina, en ``doelen.md`` is de leesbare bron die in
+álle advies- en feedback-prompts meegaat. Daarom houden we in ``doelen.md`` een
+door het dashboard beheerd profielblok bij, plus een changelog die élke
+wijziging vastlegt — zo blijven eerdere zones reproduceerbaar.
+
+Sinds de sport-afhankelijke drempels staat in dat blok per sport wat de
+drempel is én waarop de sessies van die sport beoordeeld worden: hardlopen op
+%LTHR, fietsen op %FTP (met de fiets-LTHR als terugval), zwemmen zonder zones.
 
 Het beheerde blok staat tussen twee markers; de rest van ``doelen.md`` (de met
 de hand geschreven achtergrond) blijft onaangeroerd.
@@ -15,38 +19,38 @@ de hand geschreven achtergrond) blijft onaangeroerd.
 from datetime import date
 from pathlib import Path
 
-from tricoach.power import power_zone_bounds
-from tricoach.zones import bounds_from_lthr, zone_bounds
+from tricoach.sportzones import (
+    bike_lthr,
+    bike_lthr_is_estimated,
+    ftp as athlete_ftp,
+    run_lthr,
+    run_lthr_source,
+    zone_overview_text,
+)
 
 START = "<!-- PROFIEL:START — beheerd door het dashboard, niet handmatig bewerken -->"
 END = "<!-- PROFIEL:END -->"
 CHANGELOG_HEADER = "## Wijzigingslog profielwaarden"
 
 
-def _zones_text(athlete: dict) -> str:
-    """De afgeleide %LTHR-zones als één regel."""
-    b = zone_bounds(athlete)
-    return (f"Z2 {b[0]}–{b[1] - 1} · Z3 {b[1]}–{b[2] - 1} · "
-            f"Z4 {b[2]}–{b[3] - 1} · Z5 {b[3]}+")
-
-
-def _power_zones_text(ftp: float) -> str:
-    """De afgeleide vermogenszones (Coggan) als één regel."""
-    b = [round(w) for w in power_zone_bounds(ftp)]
-    return (f"P1 <{b[0]} · P2 {b[0]}–{b[1]} · P3 {b[1]}–{b[2]} · "
-            f"P4 {b[2]}–{b[3]} · P5 {b[3]}–{b[4]} · P6 >{b[4]} W")
-
-
 def profile_block(config: dict) -> str:
     """Het beheerde profielblok als markdown (zonder de markers)."""
     a = config["athlete"]
-    ftp = a.get("ftp")
+    ftp = athlete_ftp(a)
+    bron = run_lthr_source(a)
+    fiets_hr = f"{bike_lthr(a)} bpm" + (
+        " (geschat uit de loop-LTHR)" if bike_lthr_is_estimated(a) else "")
     regels = [
         "## Profiel (actueel — beheerd door het dashboard)",
         "",
-        f"- **Max hartslag:** {a['max_hr']}",
-        f"- **LTHR:** {a['lthr']} → zones (%LTHR): {_zones_text(a)}",
-        f"- **FTP (fietsen):** {f'{ftp} W → vermogenszones (Coggan): {_power_zones_text(ftp)}' if ftp else 'nog onbekend (geen FTP-test gedaan)'}",
+        f"- **Max hartslag:** {a['max_hr']} (alleen terugval; %drempel is leidend)",
+        f"- **Drempel hardlopen (LTHR):** {run_lthr(a)} bpm"
+        + (f" — {bron}" if bron else ""),
+        "- **Drempel fietsen (FTP):** "
+        + (f"{ftp:.0f} W" if ftp else "nog onbekend (geen FTP-test gedaan)"),
+        f"- **Fiets-LTHR (secundair, voor ritten zonder vermogen):** {fiets_hr}",
+        "- **Zone-indeling per sport:**",
+        *[f"  {regel}" for regel in zone_overview_text(a).splitlines()],
         f"- **Trainingsdagen:** {a.get('training_days', '—') or '—'}",
         f"- **Beschikbare tijd per sessie:** {a.get('session_time', '—') or '—'}",
         "- **Racedoelen en streeftijden:**",
@@ -67,10 +71,12 @@ def profile_block(config: dict) -> str:
 def _profile_values(config: dict) -> dict[str, str]:
     """De profielwaarden plat, voor het vergelijken bij de changelog."""
     a = config["athlete"]
+    ftp = athlete_ftp(a)
     vals = {
         "Max hartslag": str(a.get("max_hr")),
-        "LTHR": str(a.get("lthr")),
-        "FTP": str(a.get("ftp") or ""),
+        "LTHR hardlopen": str(run_lthr(a)),
+        "LTHR fietsen": str(bike_lthr(a)),
+        "FTP": f"{ftp:.0f}" if ftp else "",
         "Trainingsdagen": str(a.get("training_days") or ""),
         "Beschikbare tijd per sessie": str(a.get("session_time") or ""),
     }

@@ -36,12 +36,14 @@ kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
    opgehaald (Open-Meteo, gratis) als objectieve context voor de feedback;
    sessies zonder GPS (zwemmen) gaan gewoon zonder wind door.
 2. **Overzicht / Trends / sporttabs** — weekvolume, tijd-in-zones en de
-   belangrijkste grafiek: tempo bij gelijke hartslag (Z2) over tijd.
+   belangrijkste grafiek: tempo bij gelijke hartslag (Z2) over tijd. Elke
+   sport wordt tegen zijn eigen drempel gelezen — zie hieronder.
 3. **Coach** — pas het weekschema aan en genereer een weekadvies
    (Anthropic API; het laatste advies blijft bewaard).
 4. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
    Ollama-model; zet de toggle aan om de cloud-coach te vragen.
-5. **Instellingen** — racedata (naam, datum), hartslagzones, Ollama-host
+5. **Instellingen** — racedata (naam, datum), de **drempels per sport**
+   (loop-LTHR, FTP en fiets-LTHR), Ollama-host
    en -model, en de LLM-routing per taak. Onderaan staat het verbruik:
    aanroepen, tokens en geschatte Anthropic-kosten (geparset uit
    memory/llm_log.md). Let op: opslaan herschrijft config.yaml.
@@ -57,10 +59,13 @@ Testen zonder dashboard kan ook:
 
 ```
 app.py                  Streamlit-dashboard (UI)
-config.yaml             zones, races, LLM-routing, paden
+config.yaml             drempels per sport, races, LLM-routing, paden
 tricoach/
   fit_parser.py         zip/FIT -> geparste activiteiten (fitdecode, incl. GPS)
-  zones.py              tijd-in-zones op basis van %LTHR
+  sportzones.py         drempels en zone-indeling PER SPORT (het ene beslispunt)
+  zones.py              tijd-in-hartslagzones op basis van %LTHR
+  ramptest.py           FTP-test herkennen + FTP-voorstel (Kickr/Zwift)
+  migrate_sportzones.py eenmalige herberekening naar de drempels per sport
   storage.py            SQLite (activities, records, lengths)
   weather.py            winddata per sessie via Open-Meteo (gratis, geen key)
   importer.py           de import-pipeline (parse -> archief -> opslaan -> log)
@@ -92,6 +97,47 @@ tests/                  losse testscripts (python tests/test_<naam>.py, draaien
                         test_parse/test_import/test_uitbreiding lezen wél
                         garmin_import/ en verwachten de projectroot als werkmap)
 ```
+
+## Drempels en zones per sport
+
+Elke sport heeft een **eigen drempel**; ze zijn niet uitwisselbaar. Alles wordt
+beslist in [tricoach/sportzones.py](tricoach/sportzones.py), zodat import,
+herberekening, UI en coach-prompt nooit uit elkaar lopen.
+
+| Sport | Primaire maat | Zone-indeling |
+|---|---|---|
+| Hardlopen | hartslag — **loop-LTHR** | %LTHR (Z1–Z5) |
+| Fietsen | **vermogen — FTP** zodra bekend | %FTP, Coggan (P1–P6) |
+| Fietsen zonder FTP of zonder powerdata | hartslag — **fiets-LTHR** | %LTHR, gemeld als *tussenoplossing* |
+| Zwemmen | — | **geen zone-oordeel** (afstand, tempo/100 m, slagritme, SWOLF; CSS als losse referentie) |
+
+De fiets-LTHR ligt standaard 8 bpm onder de loop-LTHR (gebruikelijk is 5–10) en
+is op de instellingenpagina te overschrijven. De maximale hartslag blijft een
+los profielveld: %max is alleen een terugval, %drempel is leidend.
+
+Wijzig je een drempel op de instellingen-tab, dan worden de zonetijden van álle
+sessies herrekend (elke sessie tegen de drempel van háár eigen sport) en komt de
+wijziging in `memory/lthr_geschiedenis.md` en de changelog van
+`memory/doelen.md`. Handmatig herrekenen kan ook:
+
+```powershell
+.venv\Scripts\python -m tricoach.migrate_sportzones --dry-run  # tonen
+.venv\Scripts\python -m tricoach.migrate_sportzones            # uitvoeren
+```
+
+**FTP bepalen.** Rijd je een ramptest op de Kickr (indoor, oplopend blokkig
+vermogen), dan herkent de 🔍 Sessie-tab die en stelt hij een FTP voor: 75% van
+je beste minuut. Bij een 20-minuten-veldtest is het 95% van dat vermogen. Het
+voorstel wordt nooit automatisch opgeslagen — je bevestigt het met één klik,
+waarna de vermogenszones van alle ritten worden herrekend en de vaststelling
+(datum + methode) in `memory/inzichten.md` belandt.
+
+> ⚠️ **Herijking juli 2026.** De loop-LTHR is verlaagd van 171 naar 164 en
+> fietsen heeft een eigen drempel gekregen. Alle historie is herrekend, dus de
+> trends zijn onderling consistent — maar de "tijd in zone 2"-cijfers liggen
+> lager dan in oudere weergaven (hardlopen 75% → 41%, fietsen 64% → 19%). Dat is
+> een verschoven meetlat, geen conditieverlies; de onderbouwing staat in
+> `memory/beslissingen.md`.
 
 ## Principes
 

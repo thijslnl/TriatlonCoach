@@ -46,7 +46,9 @@ from tricoach.storage import connect, load_activities, load_records, save_activi
 
 BOUNDS = [137, 152, 162, 172]
 CONFIG = {"combo": {"max_gap_min": 25}, "races": [],
-          "athlete": {"lthr": 170, "max_hr": 193}}
+          "athlete": {"max_hr": 193,
+                      "thresholds": {"running": {"lthr": 170},
+                                     "cycling": {"lthr": 162, "ftp": None}}}}
 
 
 def _act(sport: str, start: str, elapsed_s: float, distance_m: float,

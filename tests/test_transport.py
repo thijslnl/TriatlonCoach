@@ -49,9 +49,12 @@ from tricoach.transport import (
     unmark_transport,
 )
 
-BOUNDS = [136, 152, 162, 171]  # zones bij LTHR 170 (Z2 = 136-151)
-CONFIG = {"athlete": {"lthr": 170, "max_hr": 193,
-                      "zone_pct_lthr": [0.8, 0.89, 0.95, 1.0]}}
+BOUNDS = [136, 152, 162, 171]  # loopzones bij LTHR 170 (Z2 = 136-151)
+# Drempels per sport: de transport-suggestie kijkt naar de FIETS-zones, dus
+# naar de fiets-LTHR (162) — zone 2 begint daar bij 130.
+CONFIG = {"athlete": {"max_hr": 193, "zone_pct_lthr": [0.8, 0.89, 0.95, 1.0],
+                      "thresholds": {"running": {"lthr": 170},
+                                     "cycling": {"lthr": 162, "ftp": None}}}}
 
 
 def _act(sport: str, dag: int, uur: int, minuut: int, afstand_m: float,

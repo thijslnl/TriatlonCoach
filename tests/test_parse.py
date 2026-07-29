@@ -15,7 +15,8 @@ from pathlib import Path
 from tricoach.config import load_config, resolve_path
 from tricoach.fit_parser import ParsedActivity, parse_zip
 from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
-from tricoach.zones import time_in_zones, zone_bounds
+from tricoach.sportzones import hr_zone_bounds
+from tricoach.zones import time_in_zones
 
 
 def fmt_duration(seconds: float) -> str:
@@ -42,8 +43,12 @@ def fmt_pace_per_100m(speed_ms: float) -> str:
     return f"{int(sec // 60)}:{int(sec % 60):02d}/100m"
 
 
-def describe(act: ParsedActivity, bounds: list[int]) -> None:
-    """Print een leesbare samenvatting van één activiteit."""
+def describe(act: ParsedActivity, athlete: dict) -> None:
+    """Print een leesbare samenvatting van één activiteit.
+
+    De zonegrenzen zijn sport-afhankelijk: ze komen per activiteit uit de
+    drempel van háár eigen sport (zwemmen krijgt er geen).
+    """
     s = act.summary
     speed = s.get("enhanced_avg_speed") or s.get("avg_speed")
 
@@ -72,16 +77,19 @@ def describe(act: ParsedActivity, bounds: list[int]) -> None:
             if swolf is not None:
                 print(f"  gem. SWOLF ({SWOLF_FILTER_LABEL}): {swolf:.0f}")
 
+    bounds = hr_zone_bounds(athlete, act.sport)
     if not act.records.empty and "heart_rate" in act.records:
-        tiz = time_in_zones(act.records, bounds)
-        parts = [f"{z}: {fmt_duration(t)}" for z, t in tiz.items() if t > 0]
-        print(f"  tijd in zones: {'  '.join(parts)}")
+        if bounds is None:
+            print("  tijd in zones: n.v.t. (deze sport krijgt geen zone-oordeel)")
+        else:
+            tiz = time_in_zones(act.records, bounds)
+            parts = [f"{z}: {fmt_duration(t)}" for z, t in tiz.items() if t > 0]
+            print(f"  tijd in zones: {'  '.join(parts)} (grenzen {bounds})")
     print(f"  records: {len(act.records)} meetpunten")
 
 
 def main() -> None:
     config = load_config()
-    bounds = zone_bounds(config["athlete"])
     import_dir = resolve_path(config, "import_dir")
 
     zips = sorted(import_dir.glob("*.zip"))
@@ -89,7 +97,7 @@ def main() -> None:
 
     for zip_path in zips:
         for act in parse_zip(zip_path):
-            describe(act, bounds)
+            describe(act, config["athlete"])
 
 
 if __name__ == "__main__":
