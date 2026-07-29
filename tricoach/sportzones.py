@@ -12,8 +12,11 @@ dat bleek te grof:
   dan hartslag, omdat HR traag reageert en meebeweegt met warmte en
   vermoeidheid. Zolang de FTP onbekend is — of een rit geen vermogensdata
   heeft (oude sessies, rit zonder Rally-pedalen) — vallen we terug op
-  hartslagzones op de **fiets-LTHR**, die bij de meeste mensen 5–10 bpm
-  lager ligt dan bij lopen.
+  hartslagzones op de **fiets-LTHR**. De vuistregel "5–10 bpm onder de
+  loop-LTHR" is daarbij alleen een startwaarde: bij deze atleet bleek hij te
+  laag en is de fiets-LTHR bijgesteld op de eigen duurdata. Definitief
+  vaststellen gebeurt met een 20-minutentest, die in één inspanning zowel de
+  FTP als de fiets-LTHR oplevert (zie :mod:`tricoach.ramptest`).
 - **Zwemmen** — geen drempel en geen zone-oordeel. Techniek is in opbouw en
   polshartslag onder water is onbetrouwbaar; er wordt op afstand, tempo per
   100 m en slagritme gestuurd (CSS staat er los naast als referentie).
@@ -41,6 +44,7 @@ Configuraties van vóór die structuur (een platte ``athlete.lthr`` en
 """
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from tricoach.power import POWER_ZONE_NAMES, power_zone_bounds
 from tricoach.zones import ZONE_NAMES, bounds_from_lthr
@@ -304,6 +308,94 @@ def zone_overview_text(athlete: dict) -> str:
     return "\n".join(
         f"- **{sport_label(m.sport)}:** {m.summary()}" for m in zone_overview(athlete)
     )
+
+
+# --------------------------------------------------- voorlopige drempels --
+
+# Een drempel die op een schatting rust (Garmin-detectie, een vuistregel of
+# een afleiding uit duurdata) verdient een houdbaarheidsdatum: hij hoort
+# heroverwogen te worden zodra er een echte test is of de schatting verschuift.
+# Standaard herzien we na 8 weken — midden in het 4–12 weken-venster waarin
+# Garmin een drempelschatting typisch bijstelt.
+REVIEW_WEEKS_DEFAULT = 8
+
+
+def _review_suffix(blok: dict, sleutel: str, vandaag: date) -> str:
+    """De staart van een voorlopig-regel: de herzieningsdatum of het verstrijken."""
+    datum = blok.get(sleutel)
+    if not datum:
+        return ""
+    datum = date.fromisoformat(str(datum))
+    if vandaag >= datum:
+        return (f" — de herzieningsdatum ({datum:%d-%m-%Y}) is verstreken; "
+                "tijd om hem te toetsen")
+    weken = (datum - vandaag).days // 7
+    return f" — herzien rond {datum:%d-%m-%Y} (over ~{weken} weken)"
+
+
+def threshold_notes(athlete: dict, today: date | None = None) -> list[str]:
+    """Waarschuwingen over drempels die als voorlopig zijn gemarkeerd.
+
+    Een drempelblok kan ``provisional: true`` bevatten (voor de LTHR) en/of
+    ``ftp_provisional: true``, elk met een eigen ``review_reason`` /
+    ``ftp_review_reason`` en ``review_after`` / ``ftp_review_after``. Zolang
+    zo'n vlag staat, gaat er een regel mee naar de UI en de coach-prompt: het
+    cijfer is een werkaanname, geen meting. Is de herzieningsdatum verstreken,
+    dan wordt de regel dringender.
+
+    Lege lijst = alle drempels gelden als vastgesteld.
+    """
+    vandaag = today or date.today()
+    regels = []
+    for sport, label in ((RUNNING, "loop-LTHR"), (CYCLING, "fiets-LTHR")):
+        blok = _thresholds(athlete, sport)
+        if not blok.get("provisional"):
+            continue
+        reden = blok.get("review_reason") or "rust op een schatting"
+        regels.append(
+            f"De {label} ({blok.get('lthr')} bpm) is voorlopig: {reden}"
+            + _review_suffix(blok, "review_after", vandaag) + "."
+        )
+
+    # De FTP heeft een eigen markering: hij bepaalt de primaire zone-indeling
+    # voor fietsen, dus een geschatte FTP moet net zo hard opvallen.
+    fiets = _thresholds(athlete, CYCLING)
+    if fiets.get("ftp") and fiets.get("ftp_provisional"):
+        reden = (fiets.get("ftp_review_reason")
+                 or "niet uit een echte test afgeleid")
+        regels.append(
+            f"De FTP ({float(fiets['ftp']):.0f} W) is voorlopig: {reden}"
+            + _review_suffix(fiets, "ftp_review_after", vandaag) + "."
+        )
+    return regels
+
+
+def mark_provisional(athlete: dict, sport: str, reason: str,
+                     review_after: date | None = None,
+                     weeks: int = REVIEW_WEEKS_DEFAULT,
+                     kind: str = "lthr") -> dict:
+    """Markeer een drempel als voorlopig, met herzieningsdatum.
+
+    ``kind`` is ``"lthr"`` (standaard) of ``"ftp"``. Zonder ``review_after``
+    wordt de datum ``weeks`` weken vooruit gezet. Past ``athlete`` ter plekke
+    aan en geeft het terug.
+    """
+    prefix = "" if kind == "lthr" else "ftp_"
+    blok = athlete.setdefault("thresholds", {}).setdefault(sport, {})
+    blok[f"{prefix}provisional"] = True
+    blok[f"{prefix}review_reason"] = reason
+    blok[f"{prefix}review_after"] = str(
+        review_after or date.today() + timedelta(weeks=weeks))
+    return athlete
+
+
+def clear_provisional(athlete: dict, sport: str, kind: str = "lthr") -> dict:
+    """Haal een voorlopig-markering weg (er is nu een echte meting)."""
+    prefix = "" if kind == "lthr" else "ftp_"
+    blok = (athlete.get("thresholds") or {}).get(sport) or {}
+    for sleutel in ("provisional", "review_reason", "review_after"):
+        blok.pop(f"{prefix}{sleutel}", None)
+    return athlete
 
 
 # ------------------------------------------------------------- schrijven --

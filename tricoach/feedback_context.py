@@ -61,6 +61,7 @@ from tricoach.trainingslog import kerncijfers, zone_regel
 from tricoach.sportzones import (
     METHOD_NONE,
     ftp as athlete_ftp,
+    threshold_notes,
     zone2_range,
     zone_model,
     zone_overview_text,
@@ -700,6 +701,18 @@ def zone_policy_block(athlete: dict, sport: str, has_power: bool = True) -> str:
     regels.append("")
     regels.append("Zone-indeling per sport (ter referentie):")
     regels.append(zone_overview_text(athlete))
+    # Drempels die nog op een schatting rusten: het model moet weten dat het
+    # oordeel dan een marge heeft, en mag daar niet stellig over doen.
+    voorlopig = threshold_notes(athlete)
+    if voorlopig:
+        regels.append("")
+        regels.append(
+            "Let op — nog niet alle drempels zijn gemeten. Formuleer een "
+            "zone-oordeel dat op zo'n drempel rust met een lichte slag om de "
+            "arm, en beweer niet dat een sessie 'te hard' was als het verschil "
+            "binnen de onzekerheid van de drempel valt:"
+        )
+        regels += [f"- {r}" for r in voorlopig]
     return "\n".join(regels)
 
 

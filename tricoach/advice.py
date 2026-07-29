@@ -48,10 +48,13 @@ SYSTEM = (
     "wegneemt. Voor ZWEMMEN geef je NOOIT een hartslag- of zonedoel: daar "
     "stuur je op afstand, tempo per 100 m, slagritme en techniek.\n"
     "\n"
-    "Let op: de loop-drempel is in juli 2026 herijkt van 171 naar 164, dus "
-    "eerdere zonecijfers lagen optisch gunstiger. Alle historie is herrekend; "
-    "behandel dat als een verschoven meetlat en niet als vormverlies, en geef "
-    "er geen terugwerkende kritiek op."
+    "Let op: sinds juli 2026 heeft fietsen een eigen, lagere drempel dan "
+    "hardlopen. Alle historie is per sport herrekend, dus de trends zijn "
+    "consistent — maar oudere fietscijfers lagen optisch gunstiger. Behandel "
+    "dat als een verschoven meetlat en niet als vormverlies, en geef er geen "
+    "terugwerkende kritiek op. Zakt Garmin's drempelschatting na een "
+    "brick-training, dan is dat een meetartefact van de fietsbelasting vóór "
+    "het lopen — geen reden om de zones aan te passen."
 )
 
 ADVIEZEN_HEADER = """# Adviezen

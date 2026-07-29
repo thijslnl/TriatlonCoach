@@ -142,6 +142,7 @@ from tricoach.sportzones import (
     run_lthr,
     run_lthr_source,
     set_thresholds,
+    threshold_notes,
     zone2_range,
     zone_model,
     zone_overview,
@@ -682,16 +683,23 @@ with tab_overzicht:
             "🔧 **Tussenoplossing voor fietsen:** er is nog geen FTP, dus "
             f"fietssessies worden voorlopig op hartslagzones rond de "
             f"fiets-LTHR ({bike_lthr(ATHLETE)} bpm) beoordeeld. Doe een "
-            "ramptest op de Kickr en vul de FTP in — dan schakelt de app over "
-            "op %FTP-vermogenszones, de zuiverdere maat voor fietsen."
+            "**20-minutentest** op de Kickr: daar haal je in één inspanning "
+            "zowel je FTP (95% van het gemiddelde vermogen) als je fiets-LTHR "
+            "(gemiddelde hartslag over dat blok) uit. Een ramptest geeft je "
+            "alleen het vermogen."
         )
+    # Drempels die nog op een schatting rusten, expliciet als zodanig tonen.
+    for notitie in threshold_notes(ATHLETE):
+        st.caption(f"❓ {notitie}")
 
     st.markdown("**Loop-LTHR door de tijd** (de zones voor hardlopen schuiven mee)")
     st.caption(
-        "De sprong van 171 naar 164 in juli 2026 is een bewuste herijking op de "
-        "Garmin-schatting, geen conditieverlies — zie memory/beslissingen.md. "
-        "Alle zonecijfers zijn met de nieuwe drempel herrekend, dus de trends "
-        "zijn onderling vergelijkbaar."
+        "Bij een wijziging worden alle zonetijden herrekend, dus de trends "
+        "blijven onderling vergelijkbaar — zie memory/beslissingen.md. Let op: "
+        "Garmin's automatische schatting zakt tijdelijk ná een brick-training "
+        "(de fietsbelasting vóór het lopen drukt de loopdrempel). Zo'n dip is "
+        "een meetartefact; neem hem niet over zonder bevestiging uit lósse "
+        "loopsessies."
     )
     hist = lthr_history(MEMORY_DIR, run_lthr(ATHLETE), kind=LTHR_RUN)
     if hist.empty:
@@ -1438,30 +1446,53 @@ with tab_sessie:
                               fallback=False)
             kop = ("🧗 **Dit ziet eruit als een ramptest.**" if ramp
                    else "📈 **Er zit een 20-minuten-inspanning in deze rit.**")
-            with st.expander(
-                    f"{kop.strip('*# ')} — FTP-voorstel: "
-                    f"{voorstel.ftp_watt:.0f} W", expanded=bool(ramp)):
-                st.markdown(
+            titel = f"{kop.strip('*# ')} — FTP-voorstel: {voorstel.ftp_watt:.0f} W"
+            if voorstel.lthr_bpm:
+                titel += f" + fiets-LTHR {voorstel.lthr_bpm} bpm"
+            with st.expander(titel, expanded=bool(ramp)):
+                regels = (
                     f"{kop}\n\n{voorstel.explanation}\n\n"
                     f"- **Gemeten:** {voorstel.basis_watt:.0f} W over "
                     f"{voorstel.window_s // 60} min\n"
-                    f"- **Afleiding:** {voorstel.factor:.0%} → "
+                    f"- **Afleiding FTP:** {voorstel.factor:.0%} → "
                     f"**{voorstel.ftp_watt:.0f} W**\n"
-                    f"- **Betrouwbaarheid:** {voorstel.confidence}\n"
                 )
+                if voorstel.lthr_bpm:
+                    regels += (
+                        f"- **Afleiding fiets-LTHR:** gemiddelde hartslag over "
+                        f"datzelfde blok → **{voorstel.lthr_bpm} bpm**\n")
+                regels += f"- **Betrouwbaarheid:** {voorstel.confidence}\n"
+                st.markdown(regels)
+
                 huidige_ftp = f"{FTP:.0f} W" if FTP else "nog niet ingesteld"
                 st.caption(
-                    f"Huidige FTP-instelling: {huidige_ftp}. Bevestigen zet de "
-                    "waarde in config.yaml, herrekent de vermogenszones van "
-                    "alle ritten en legt de vaststelling vast in "
-                    "memory/inzichten.md en de drempelgeschiedenis."
+                    f"Huidige FTP-instelling: {huidige_ftp}; fiets-LTHR "
+                    f"{bike_lthr(ATHLETE)} bpm. Bevestigen zet de waarde(n) in "
+                    "config.yaml, herrekent de zones van alle ritten en legt de "
+                    "vaststelling vast in memory/inzichten.md en de "
+                    "drempelgeschiedenis."
                 )
-                if st.button(f"✅ FTP op {voorstel.ftp_watt:.0f} W zetten",
-                             key=f"ftp_bevestig_{gekozen}"):
+                # Een 20-minutentest levert beide drempels; de atleet kiest of
+                # hij de fiets-LTHR meteen meeneemt.
+                ook_lthr = False
+                if voorstel.lthr_bpm:
+                    ook_lthr = st.checkbox(
+                        f"Ook de fiets-LTHR bijwerken naar "
+                        f"{voorstel.lthr_bpm} bpm (nu {bike_lthr(ATHLETE)})",
+                        value=True, key=f"ook_lthr_{gekozen}",
+                        help="De gemiddelde hartslag over het 20-minutenblok is "
+                             "de klassieke schatting van je fiets-drempel. "
+                             "Hiermee kloppen ook de ritten zónder vermogen.")
+                knop = f"✅ FTP op {voorstel.ftp_watt:.0f} W zetten"
+                if ook_lthr:
+                    knop += f" + fiets-LTHR {voorstel.lthr_bpm}"
+                if st.button(knop, key=f"ftp_bevestig_{gekozen}"):
                     nieuwe_ftp = float(round(voorstel.ftp_watt))
+                    nieuwe_bike_lthr = (voorstel.lthr_bpm if ook_lthr
+                                        else bike_lthr(ATHLETE))
                     nieuw = copy.deepcopy(config)
                     set_thresholds(nieuw["athlete"], run_lthr(ATHLETE),
-                                   bike_lthr(ATHLETE), nieuwe_ftp)
+                                   nieuwe_bike_lthr, nieuwe_ftp)
                     save_config(nieuw)
                     profile_mod.update_doelen(MEMORY_DIR, config, nieuw,
                                               note=f"FTP uit {voorstel.method}")
@@ -1475,13 +1506,23 @@ with tab_sessie:
                         basis_watt=voorstel.basis_watt,
                         session_date=sessie["start_time"],
                         note="Bevestigd vanuit het sessie-detail in het dashboard.")
-                    st.session_state["settings_flash"] = (
+                    # Fiets-LTHR uit dezelfde test: ook de hartslagzones van
+                    # alle sessies moeten dan mee herrekend worden.
+                    if ook_lthr and nieuwe_bike_lthr != bike_lthr(ATHLETE):
+                        lthr_append(MEMORY_DIR, nieuwe_bike_lthr,
+                                    f"Gem. HR over het 20-minutenblok van "
+                                    f"{voorstel.method} (was {bike_lthr(ATHLETE)})",
+                                    kind=LTHR_BIKE)
+                        recompute_zones(conn, nieuw["athlete"])
+                    melding = (
                         f"FTP op {nieuwe_ftp:.0f} W gezet ({voorstel.method}); "
                         f"vermogenszones van {n_pw} ritten herrekend."
                     )
-                    st.success(
-                        f"FTP vastgesteld op {nieuwe_ftp:.0f} W — "
-                        f"vermogenszones van {n_pw} ritten herrekend.")
+                    if ook_lthr:
+                        melding += (f" Fiets-LTHR op {nieuwe_bike_lthr} bpm "
+                                    "gezet; hartslagzones herrekend.")
+                    st.session_state["settings_flash"] = melding
+                    st.success(melding)
                     st.rerun()
 
     if sessie["sport"] == "running":
@@ -2842,6 +2883,8 @@ with tab_settings:
         "hartslag blijft een los profielveld: de %max-methode is alleen een "
         "terugval, %drempel is leidend."
     )
+    for notitie in threshold_notes(config["athlete"]):
+        st.caption(f"❓ **Voorlopige drempel** — {notitie}")
     new_max_hr = st.number_input(
         "Maximale hartslag", 120, 230, int(config["athlete"]["max_hr"]),
         help="Alleen terugval en referentie; de zones worden van de "
@@ -2880,9 +2923,12 @@ with tab_settings:
              "alle ritten met powerdata herrekend.")
     new_bike_lthr = c2.number_input(
         "Fiets-LTHR (bpm)", 100, 220, bike_lthr(config["athlete"]),
-        help="De drempelhartslag op de fiets, meestal 5–10 bpm lager dan bij "
-             "lopen. Wordt gebruikt zolang er geen FTP is, én voor ritten "
-             "zonder vermogensdata (oude sessies of een rit zonder Rally).")
+        help="De drempelhartslag op de fiets. De vuistregel '5–10 bpm onder "
+             "de loop-LTHR' is maar een startpunt — je eigen duurdata weegt "
+             "zwaarder. Definitief vaststellen doe je met een 20-minutentest: "
+             "de gemiddelde hartslag over dat blok is je fiets-LTHR. Deze "
+             "waarde geldt zolang er geen FTP is, én voor elke rit zonder "
+             "vermogensdata.")
     bike_preview = bounds_from_lthr(new_bike_lthr, config["athlete"].get("zone_pct_lthr"))
     st.caption(
         f"Fiets-hartslagzones bij LTHR {new_bike_lthr} (%LTHR): "

@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tricoach.power import FTP_EST_FACTOR, FTP_EST_WINDOW_S, best_20min_power
+from tricoach.power import FTP_EST_FACTOR, FTP_EST_WINDOW_S
 
 # Ramptest: venster van één trap en de factor op het beste 1-minuutvermogen.
 RAMP_WINDOW_S = 60
@@ -63,6 +63,12 @@ class FTPProposal:
     1-minuut- respectievelijk 20-minutengemiddelde), ``ftp_watt`` de daaruit
     afgeleide FTP. ``confidence`` is "hoog" bij een herkende ramptest en
     "indicatie" bij een 20-minutenafleiding uit een gewone rit.
+
+    ``lthr_bpm`` is de bonus van een 20-minutentest: de gemiddelde hartslag
+    over precies dat blok is de klassieke schatting van de **fiets-LTHR**. Uit
+    één inspanning komen zo twee drempels. Bij een ramptest blijft dit None —
+    daar is de hartslag aan het eind maximaal, niet drempelniveau, en die
+    waarde zou de fiets-LTHR fors overschatten.
     """
 
     method: str
@@ -72,11 +78,15 @@ class FTPProposal:
     factor: float
     confidence: str
     explanation: str
+    lthr_bpm: int | None = None
 
     def as_text(self) -> str:
         """Het voorstel als één leesbare regel (UI, log en prompt)."""
-        return (f"FTP {self.ftp_watt:.0f} W — {self.method}: "
-                f"{self.basis_watt:.0f} W × {self.factor:.0%}")
+        regel = (f"FTP {self.ftp_watt:.0f} W — {self.method}: "
+                 f"{self.basis_watt:.0f} W × {self.factor:.0%}")
+        if self.lthr_bpm:
+            regel += f"; fiets-LTHR {self.lthr_bpm} bpm (gem. HR over het blok)"
+        return regel
 
 
 # ---------------------------------------------------------- vermogensprofiel --
@@ -119,6 +129,47 @@ def step_profile(records: pd.DataFrame, step_s: int = RAMP_WINDOW_S) -> list[flo
         return []
     blokken = serie.resample(f"{step_s}s").mean().dropna()
     return [float(v) for v in blokken.to_numpy()]
+
+
+def best_20min_window(records: pd.DataFrame) -> dict | None:
+    """Het beste 20-minutenblok, mét de gemiddelde hartslag over datzelfde blok.
+
+    Waar :func:`tricoach.power.best_20min_power` alleen het vermogen geeft,
+    zoekt deze functie ook *wáár* dat blok lag, zodat de hartslag erover
+    gemiddeld kan worden. Dat is precies wat een 20-minutentest zo nuttig
+    maakt: uit één inspanning komen zowel de FTP (95% van het vermogen) als de
+    fiets-LTHR (de gemiddelde hartslag over het blok).
+
+    Geeft ``{"avg_watt", "avg_hr", "start", "end"}`` of None als de rit korter
+    is dan 20 minuten of geen powerdata heeft. ``avg_hr`` is None zonder
+    hartslagdata.
+    """
+    serie = _power_series(records)
+    if serie.empty:
+        return None
+    venster = pd.Timedelta(seconds=FTP_EST_WINDOW_S)
+    if (serie.index[-1] - serie.index[0]) < venster:
+        return None
+
+    rollend = serie.rolling(f"{FTP_EST_WINDOW_S}s").mean()
+    vol = rollend[serie.index >= serie.index[0] + venster]
+    if vol.empty:
+        return None
+    einde = vol.idxmax()          # het rolling-venster eindigt hier
+    start = einde - venster
+
+    resultaat = {"avg_watt": float(vol.max()), "avg_hr": None,
+                 "start": start, "end": einde}
+    if "heart_rate" not in records:
+        return resultaat
+    hr = records.dropna(subset=["timestamp", "heart_rate"])
+    if hr.empty:
+        return resultaat
+    hr = hr.set_index(pd.DatetimeIndex(hr["timestamp"]))["heart_rate"]
+    blok = hr[(hr.index >= start) & (hr.index <= einde)]
+    if not blok.empty:
+        resultaat["avg_hr"] = float(blok.mean())
+    return resultaat
 
 
 def is_ramp_test(records: pd.DataFrame, indoor: bool) -> bool:
@@ -170,7 +221,8 @@ def ftp_proposal(records: pd.DataFrame, indoor: bool) -> FTPProposal | None:
 
     1. Een herkende **ramptest** → 75% van het beste 1-minuutvermogen.
     2. Anders een **20-minuten-inspanning** die er duidelijk uitspringt ten
-       opzichte van de rest van de rit → 95% van dat vermogen, als indicatie.
+       opzichte van de rest van de rit → 95% van dat vermogen, als indicatie,
+       plus de fiets-LTHR uit de gemiddelde hartslag over datzelfde blok.
 
     Een gewone duurrit levert niets op: daar zit geen maximale inspanning in,
     dus elke afleiding zou de FTP onderschatten.
@@ -189,30 +241,43 @@ def ftp_proposal(records: pd.DataFrame, indoor: bool) -> FTPProposal | None:
                     "Deze sessie heeft het profiel van een ramptest: indoor, "
                     "met een blokkig vermogen dat trede voor trede oploopt naar "
                     "een piek aan het eind. De gangbare afleiding is 75% van de "
-                    "laatste volledige minuut."
+                    "laatste volledige minuut. Let op: een ramptest levert "
+                    "alleen vermogen op — de hartslag is aan het eind maximaal, "
+                    "niet drempelniveau, dus hier komt géén fiets-LTHR uit. "
+                    "Een 20-minutentest geeft je beide drempels in één keer."
                 ),
             )
 
-    beste20 = best_20min_power(records)
-    if not beste20:
+    venster = best_20min_window(records)
+    if not venster:
         return None
     serie = _power_series(records)
     gemiddeld = float(serie.mean()) if not serie.empty else 0.0
-    if gemiddeld <= 0 or beste20 / gemiddeld < FIELD_MIN_INTENSITY:
+    if gemiddeld <= 0 or venster["avg_watt"] / gemiddeld < FIELD_MIN_INTENSITY:
         return None
+    lthr = round(venster["avg_hr"]) if venster["avg_hr"] else None
+    uitleg = (
+        "Geen ramptest herkend, maar er zit een aaneengesloten blok van 20 "
+        "minuten in dat duidelijk boven het ritgemiddelde ligt. 95% daarvan "
+        "is de klassieke veldtest-schatting — een ondergrens zolang het "
+        "geen echte, volledig uitgereden test was."
+    )
+    if lthr:
+        uitleg += (
+            f" Bonus: de gemiddelde hartslag over precies dat blok is "
+            f"{lthr} bpm — de klassieke schatting van de **fiets-LTHR**. Uit "
+            "één inspanning komen zo beide drempels, waar een ramptest alleen "
+            "het vermogen geeft."
+        )
     return FTPProposal(
         method=METHOD_FIELD,
-        ftp_watt=beste20 * FTP_EST_FACTOR,
-        basis_watt=beste20,
+        ftp_watt=venster["avg_watt"] * FTP_EST_FACTOR,
+        basis_watt=venster["avg_watt"],
         window_s=FTP_EST_WINDOW_S,
         factor=FTP_EST_FACTOR,
         confidence="indicatie",
-        explanation=(
-            "Geen ramptest herkend, maar er zit een aaneengesloten blok van 20 "
-            "minuten in dat duidelijk boven het ritgemiddelde ligt. 95% daarvan "
-            "is de klassieke veldtest-schatting — een ondergrens zolang het "
-            "geen echte, volledig uitgereden test was."
-        ),
+        explanation=uitleg,
+        lthr_bpm=lthr,
     )
 
 

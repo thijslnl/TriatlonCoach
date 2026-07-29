@@ -132,12 +132,20 @@ voorstel wordt nooit automatisch opgeslagen — je bevestigt het met één klik,
 waarna de vermogenszones van alle ritten worden herrekend en de vaststelling
 (datum + methode) in `memory/inzichten.md` belandt.
 
-> ⚠️ **Herijking juli 2026.** De loop-LTHR is verlaagd van 171 naar 164 en
-> fietsen heeft een eigen drempel gekregen. Alle historie is herrekend, dus de
-> trends zijn onderling consistent — maar de "tijd in zone 2"-cijfers liggen
-> lager dan in oudere weergaven (hardlopen 75% → 41%, fietsen 64% → 19%). Dat is
-> een verschoven meetlat, geen conditieverlies; de onderbouwing staat in
+> ⚠️ **Trendbreuk juli 2026 — alleen voor fietsen en zwemmen.** Fietsen wordt nu
+> tegen de eigen, lagere fiets-LTHR gelezen (zone 2-plafond 150 → 145), dus
+> oudere fietscijfers lagen optisch gunstiger. Zwemmen heeft geen zonecijfers
+> meer. Voor hardlopen is er géén breuk: die drempel is en blijft 170. Alle
+> historie is per sport herrekend; de onderbouwing staat in
 > `memory/beslissingen.md`.
+
+> 🩺 **Garmin-drempeldip na een brick is een artefact.** Rijd je een brick
+> (fietsen, dan lopen), dan liggen je loophartslagen bij hetzelfde tempo hoger
+> doordat de benen voorbelast zijn — Garmin leest dat als een lágere
+> lactaatdrempel en stelt zijn schatting tijdelijk naar beneden bij. Neem die
+> dip niet over: alleen een verschuiving die terugkomt over meerdere **losse**
+> loopsessies is een echt signaal. De coach-prompts weten dit en trekken er
+> geen conclusie uit.
 
 ## Principes
 
