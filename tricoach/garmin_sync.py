@@ -116,7 +116,11 @@ def connect_client(tokens_only: bool = False):
     if result1 == "needs_mfa":
         return "mfa", (client, result2)
     _save_tokens(client)
-    return "ok", client
+    # Bij return_on_mfa keert login() vroeg terug ZONDER het profiel te laden;
+    # endpoints die de display name in de URL zetten (o.a. de dagsamenvatting
+    # met rustpols/stress/body battery) falen dan stilletjes. Opnieuw inloggen
+    # via de zojuist bewaarde tokens laadt het profiel wél.
+    return "ok", _relogin_via_tokens(client)
 
 
 def complete_mfa(client, client_state: dict, mfa_code: str):
@@ -129,14 +133,33 @@ def complete_mfa(client, client_state: dict, mfa_code: str):
     return client
 
 
+def _garth(client):
+    """Het interne garth-object: heet ``garth`` (<=0.2.x) of ``client`` (0.3.x)."""
+    return getattr(client, "garth", None) or getattr(client, "client", None)
+
+
 def _save_tokens(client) -> None:
     """Bewaar de OAuth-tokens; mislukken is niet fataal (dan volgende keer
     opnieuw inloggen)."""
     try:
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-        client.garth.dump(str(TOKEN_DIR))
+        _garth(client).dump(str(TOKEN_DIR))
     except Exception:
         pass
+
+
+def _relogin_via_tokens(client):
+    """Verse client via de bewaarde tokens (mét profiel); anders de oude."""
+    from garminconnect import Garmin
+
+    if not has_tokens():
+        return client
+    try:
+        vers = Garmin()
+        vers.login(str(TOKEN_DIR))
+        return vers
+    except Exception:
+        return client
 
 
 def logout() -> None:
@@ -233,6 +256,17 @@ def _fetch_day(client, dag: date) -> dict:
         })
     except Exception:
         pass
+
+    if waarden.get("resting_hr") is None:
+        # De dagsamenvatting kan falen of de rustpols weglaten; het aparte
+        # rustpols-endpoint is dan de terugval.
+        try:
+            rhr = client.get_rhr_day(iso)
+            waarden["resting_hr"] = _get(
+                rhr, "allMetrics", "metricsMap",
+                "WELLNESS_RESTING_HEART_RATE", 0, "value")
+        except Exception:
+            pass
 
     try:
         hrv = client.get_hrv_data(iso) or {}
