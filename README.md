@@ -16,6 +16,20 @@ python -m venv .venv
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
 ```
 
+Voor de Garmin-koppeling (wellness-data + automatische activiteiten-sync)
+komen er twee regels bij in `.env` (blijft buiten git):
+
+```
+GARMIN_EMAIL=jij@example.com
+GARMIN_PASSWORD=...
+```
+
+De koppeling gebruikt de onofficiële Connect-API (python-garminconnect):
+eenmalig inloggen via de sync-knop (MFA wordt in de zijbalk afgehandeld),
+daarna werken de bewaarde tokens in `data/garmin_tokens/` maandenlang. Een
+mislukte sync breekt het dashboard nooit — je krijgt een melding en de
+bestaande data blijft gewoon staan.
+
 Controleer in [config.yaml](config.yaml) of het Ollama-adres en de modeltag
 kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
 
@@ -38,11 +52,23 @@ kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
 2. **Overzicht / Trends / sporttabs** — weekvolume, tijd-in-zones en de
    belangrijkste grafiek: tempo bij gelijke hartslag (Z2) over tijd. Elke
    sport wordt tegen zijn eigen drempel gelezen — zie hieronder.
-3. **Coach** — pas het weekschema aan en genereer een weekadvies
+3. **Garmin-sync** (zijbalk) — haalt met één klik de dagelijkse
+   wellness-data (rustpols, HRV, slaap, body battery, stress, VO2 max,
+   training readiness) én nieuwe activiteiten als origineel FIT-bestand
+   binnen. Activiteiten doorlopen exact dezelfde import-pipeline als een
+   handmatige upload (archief, trainingslog, feedback) en worden dubbel
+   gededupliceerd: op Garmin activity-ID vóór het downloaden en op de
+   starttijd-sleutel in de pipeline — handmatig geüploade én verwijderde
+   sessies komen dus nooit dubbel of stilletjes terug binnen. Optioneel
+   synct de app automatisch bij het openen (instellingen-tab). De
+   **🌙 Herstel-tab** toont de trends (7-daags gemiddelde is de maat) en de
+   kruising met je trainingsbelasting; de coach-feedback krijgt de recente
+   herstelcontext mee als context, niet als oordeel.
+4. **Coach** — pas het weekschema aan en genereer een weekadvies
    (Anthropic API; het laatste advies blijft bewaard).
-4. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
+5. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
    Ollama-model; zet de toggle aan om de cloud-coach te vragen.
-5. **Instellingen** — racedata (naam, datum), de **drempels per sport**
+6. **Instellingen** — racedata (naam, datum), de **drempels per sport**
    (loop-LTHR, FTP en fiets-LTHR), Ollama-host
    en -model, en de LLM-routing per taak. Onderaan staat het verbruik:
    aanroepen, tokens en geschatte Anthropic-kosten (geparset uit
@@ -67,6 +93,9 @@ tricoach/
   ramptest.py           FTP-test herkennen + FTP-voorstel (Kickr/Zwift)
   migrate_sportzones.py eenmalige herberekening naar de drempels per sport
   storage.py            SQLite (activities, records, lengths)
+  wellness.py           dagelijkse wellness-data (rustpols, HRV, slaap, ...)
+  garmin_sync.py        Garmin Connect-sync: wellness + activiteiten (dedup
+                        op activity-ID én starttijd; MFA; zacht falen)
   weather.py            winddata per sessie via Open-Meteo (gratis, geen key)
   importer.py           de import-pipeline (parse -> archief -> opslaan -> log)
   archive.py            origineel-archief van uploads (uploads/yyyy/mm/, versies)
@@ -86,7 +115,10 @@ memory/                 het leesbare geheugen van de tool (markdown)
   externe_data_log.md   elke Open-Meteo-windaanroep (locatie, uur, windwaarden)
   inzichten.md          langetermijnpatronen
   beslissingen.md       architectuurkeuzes en waarom
-data/training.db        SQLite met de ruwe sessie- en seconde-data
+data/training.db        SQLite met de ruwe sessie- en seconde-data, de
+                        wellness-dagen, de bewaarde coach-feedback per sessie
+                        (session_feedback) en de sync-status
+data/garmin_tokens/     OAuth-tokens van de Garmin-login (buiten git)
 uploads/                onveranderlijk archief van elk geüpload FIT-origineel
                         (uploads/yyyy/mm/yyyy-mm-dd_HHmm_<activityid>.fit;
                         heruploads met andere inhoud worden _v2, _v3, ...)

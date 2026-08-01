@@ -9,7 +9,7 @@ dezelfde import-pipeline als de commandline (tricoach.importer).
 
 import copy
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -19,6 +19,8 @@ import streamlit as st
 import dotenv
 
 from tricoach import body
+from tricoach import garmin_sync
+from tricoach import wellness
 from tricoach import profile as profile_mod
 from tricoach.advice import generate_advice, generate_insights, last_advice, last_insights
 from tricoach.analysis import (
@@ -46,7 +48,7 @@ from tricoach.combos import (
     set_combo_status,
 )
 from tricoach.config import load_config, resolve_path
-from tricoach.feedback import generate_feedback
+from tricoach.feedback import generate_feedback, load_session_feedback
 from tricoach.formatting import (
     GEEN_WAARDE,
     effective_speed_ms,
@@ -297,6 +299,63 @@ def get_conn():
     return connect(resolve_path(config, "database"))
 
 
+def run_garmin_sync(client) -> None:
+    """Volledige Garmin-sync: wellness + nieuwe activiteiten + feedback.
+
+    Nieuwe activiteiten doorlopen exact dezelfde afhandeling als een
+    handmatige upload: transport-vermoedens gaan naar de bevestigingsvraag,
+    de rest krijgt coach-feedback die bovenaan de pagina verschijnt (en in de
+    database bewaard blijft). Fouten per onderdeel worden meldingen, geen
+    crashes — het dashboard draait altijd door op de bestaande data.
+    """
+    g = config.get("garmin", {})
+    c = get_conn()
+    router_sync = LLMRouter(config, MEMORY_DIR)
+    meldingen = []
+    try:
+        w = garmin_sync.sync_wellness(
+            client, c, days=int(g.get("wellness_days", 30)))
+        meldingen.append(f"wellness {w.fetched} dag(en) bijgewerkt")
+
+        a = garmin_sync.sync_activities(
+            client, c, config, MEMORY_DIR,
+            days=int(g.get("activities_days", 14)),
+            observation_fn=lambda act, tiz: session_observation(
+                router_sync, act, tiz),
+            weather_fn=lambda act: wind_for_activity(act, MEMORY_DIR),
+            uploads_dir=UPLOADS_DIR,
+        )
+        if a.new:
+            meldingen.append(f"{len(a.new)} nieuwe activiteit(en)")
+        bekend = a.skipped_known + a.duplicates
+        if bekend:
+            meldingen.append(f"{bekend} al bekend")
+        if a.deleted_kept:
+            meldingen.append(f"{a.deleted_kept} verwijderd gebleven")
+        if a.errors:
+            meldingen.append(f"{len(a.errors)} activiteit(en) mislukt")
+
+        for r in a.new:
+            if r.transport_suggested:
+                st.session_state.setdefault("transport_suggesties", []).append(r)
+                continue
+            try:
+                fb = generate_feedback(
+                    router_sync, c, MEMORY_DIR, config,
+                    r.activity, r.tiz, r.observation,
+                    user_note=r.user_note, wind=r.wind,
+                    training_label=r.training_label,
+                )
+                st.session_state.setdefault("upload_feedback", []).append(fb)
+            except Exception as e:
+                meldingen.append(f"feedback overgeslagen: {e}")
+
+        garmin_sync.mark_synced(c, " · ".join(meldingen))
+        st.session_state["sync_flash"] = "✅ Garmin-sync: " + " · ".join(meldingen)
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------- zijbalk --
 with st.sidebar:
     st.title("🏊🚴🏃 Triatlon Coach")
@@ -396,6 +455,62 @@ with st.sidebar:
             # de volgende upload of tot 'sluiten'.
             st.session_state["upload_feedback"] = verse_feedback
 
+    st.divider()
+    st.subheader("🔄 Garmin-sync")
+    _c = get_conn()
+    laatste_sync = garmin_sync.last_sync(_c)
+    _c.close()
+    if laatste_sync:
+        st.caption(f"Laatst gesynct: **{laatste_sync:%d-%m-%Y %H:%M}**")
+    else:
+        st.caption(
+            "Nog nooit gesynct. Zet `GARMIN_EMAIL` en `GARMIN_PASSWORD` in "
+            "`.env` (naast de API-key) en klik hieronder; eenmalig inloggen "
+            "is genoeg, daarna werken de bewaarde tokens."
+        )
+
+    mfa_pending = st.session_state.get("garmin_mfa")
+    if mfa_pending:
+        # Garmin vraagt een MFA-code (mail/app); de login wacht in
+        # session_state tot de code er is.
+        mfa_code = st.text_input(
+            "MFA-code van Garmin", key="garmin_mfa_code",
+            help="Garmin stuurde een code per e-mail of app; vul die hier in "
+                 "om de koppeling af te ronden.",
+        )
+        col_ok, col_stop = st.columns(2)
+        if col_ok.button("✅ Code bevestigen", disabled=not mfa_code,
+                         use_container_width=True):
+            client, mfa_state = mfa_pending
+            try:
+                client = garmin_sync.complete_mfa(client, mfa_state, mfa_code)
+                del st.session_state["garmin_mfa"]
+                with st.spinner("Synchroniseren met Garmin..."):
+                    run_garmin_sync(client)
+                st.rerun()
+            except garmin_sync.GarminSyncError as e:
+                st.error(str(e))
+        if col_stop.button("Annuleren", use_container_width=True):
+            del st.session_state["garmin_mfa"]
+            st.rerun()
+    elif st.button("🔄 Nu synchroniseren", use_container_width=True):
+        # Zacht falen: elke fout wordt een melding in de zijbalk, nooit een
+        # crash — het dashboard blijft op de bestaande data draaien.
+        try:
+            with st.spinner("Verbinden met Garmin..."):
+                status, payload = garmin_sync.connect_client()
+            if status == "mfa":
+                st.session_state["garmin_mfa"] = payload
+                st.rerun()
+            else:
+                with st.spinner("Synchroniseren met Garmin..."):
+                    run_garmin_sync(payload)
+                st.rerun()
+        except garmin_sync.GarminSyncError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Garmin-sync mislukt: {e}")
+
     st.caption("Weather data by [Open-Meteo.com](https://open-meteo.com) (CC BY 4.0)")
 
 # ------------------------------------------------------------------- data --
@@ -415,6 +530,40 @@ def archief_inhaalslag() -> int:
 
 
 archief_inhaalslag()
+
+
+def auto_sync_indien_nodig() -> None:
+    """Stille periodieke Garmin-sync bij het laden van de pagina.
+
+    Draait hooguit één keer per browsersessie, alleen als hij in de config
+    aanstaat, er bewaarde tokens zijn (nooit een interactieve login of MFA
+    afdwingen) en de vorige sync oud genoeg is. Elke fout is een stille
+    waarschuwing — het dashboard werkt gewoon door op de bestaande data.
+    """
+    g = config.get("garmin", {})
+    if not g.get("auto_sync", False) or st.session_state.get("auto_sync_gedaan"):
+        return
+    if not garmin_sync.has_tokens():
+        # Nog nooit ingelogd: stil overslaan — de zijbalk legt de setup uit.
+        # De waarschuwing hieronder is voor échte problemen (verlopen tokens,
+        # netwerk), niet voor een koppeling die simpelweg nog niet bestaat.
+        return
+    st.session_state["auto_sync_gedaan"] = True
+    laatste = garmin_sync.last_sync(conn)
+    uren = float(g.get("auto_sync_hours", 6))
+    if laatste and datetime.now() - laatste < timedelta(hours=uren):
+        return
+    try:
+        with st.spinner("Automatische Garmin-sync..."):
+            _, client = garmin_sync.connect_client(tokens_only=True)
+            run_garmin_sync(client)
+    except Exception as e:
+        st.warning(f"Automatische Garmin-sync mislukt ({e}) — het dashboard "
+                   "toont de laatst bekende data. Handmatig syncen kan via "
+                   "de zijbalk.")
+
+
+auto_sync_indien_nodig()
 
 acts = load_activities(conn)
 
@@ -578,15 +727,17 @@ def render_transport_suggesties():
                 st.rerun()
 
 
+if sync_flash := st.session_state.pop("sync_flash", None):
+    st.success(sync_flash)
 render_transport_suggesties()
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
- tab_zwemmen, tab_bricks, tab_lichaam, tab_coach, tab_chat, tab_log,
+ tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_coach, tab_chat, tab_log,
  tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
-     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🧠 Coach", "💬 Chat", "📖 Logboek",
-     "⚙️ Instellingen"]
+     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🧠 Coach", "💬 Chat",
+     "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -1406,6 +1557,18 @@ with tab_sessie:
             f"{sessie_model.threshold_label} → {sessie_model.bounds_text()}"
             + (f" · {sessie_model.reason}" if sessie_model.reason else "")
         )
+
+    # Bewaarde coach-feedback bij deze sessie (database, sinds de sync-
+    # uitbreiding): zo is de coaching altijd terug te lezen, ook van
+    # automatisch gesyncte sessies waarvan niemand de upload-flits zag.
+    bewaarde_fb = load_session_feedback(conn, gekozen)
+    if bewaarde_fb:
+        with st.expander(f"🗣️ Coach-feedback bij deze sessie ({len(bewaarde_fb)})"):
+            for f in bewaarde_fb:
+                st.caption(f["created_at"][:16].replace("T", " "))
+                st.success(f["feedback"])
+                if f["aanpassing"]:
+                    st.warning(f"**Voorgestelde aanpassing:** {f['aanpassing']}")
 
     if sessie["sport"] == "cycling" and pd.notna(sessie.get("avg_power")):
         # Vermogenskerncijfers (sinds de Rally/Kickr). EF = NP per hartslag:
@@ -2544,6 +2707,15 @@ with tab_lichaam:
     body.ensure_table(conn)
     metingen = body.load_measurements(conn)
 
+    # Flits van de vorige rerun: de st.rerun() na het opslaan waaide de
+    # succesmelding én de verse trendduiding meteen weg, waardoor de duiding
+    # alleen nog onderin het logboek terechtkwam. Nu blijft hij in beeld.
+    if body_flash := st.session_state.pop("body_flash", None):
+        datum_flash, duiding_flash = body_flash
+        st.success(f"Meting van {datum_flash:%d-%m-%Y} opgeslagen.")
+        if duiding_flash:
+            st.info(f"**Trendduiding:** {duiding_flash}")
+
     # -- Invoer (voorgevuld met de laatste meting of een screenshot) --------
     with st.expander("➕ Nieuwe meting invoeren", expanded=False):
         st.caption(
@@ -2597,9 +2769,11 @@ with tab_lichaam:
                 body.save_measurement(conn, meetdatum, waarden)
                 body.log_measurement(MEMORY_DIR, meetdatum, waarden)
                 with st.spinner("Korte trendduiding..."):
-                    body.summarize_trend(router, conn, MEMORY_DIR)
+                    duiding = body.summarize_trend(router, conn, MEMORY_DIR)
                 st.session_state.pop("body_prefill", None)
-                st.success(f"Meting van {meetdatum:%d-%m-%Y} opgeslagen.")
+                # Via een flash over de rerun heen, anders is de melding (en
+                # de duiding) meteen weer weg — zie bovenaan deze tab.
+                st.session_state["body_flash"] = (meetdatum, duiding)
                 st.rerun()
 
     # -- Meting verwijderen -------------------------------------------------
@@ -2723,6 +2897,196 @@ with tab_lichaam:
     if log_path.exists():
         with st.expander("📖 Logboek & trendduiding"):
             st.markdown(log_path.read_text(encoding="utf-8"))
+
+# ----------------------------------------------------------------- herstel --
+with tab_herstel:
+    st.subheader("🌙 Herstel — rustpols, HRV & slaap")
+    st.caption(
+        "Dagelijkse wellness-data uit Garmin Connect. Dag-tot-dag-ruis is "
+        "groot: de **dikke lijn (7-daags gemiddelde)** is de maat, niet de "
+        "losse dag. Doel: objectief zien of de vroegere bedtijd (22:00) het "
+        "herstel verbetert en hoe rustpols en HRV meebewegen met zware "
+        "trainingsweken."
+    )
+    wdf = wellness.load_wellness(conn)
+    sync_moment = garmin_sync.last_sync(conn)
+    if sync_moment:
+        st.caption(f"Laatst gesynct: **{sync_moment:%d-%m-%Y %H:%M}** — "
+                   "opnieuw syncen kan via de zijbalk.")
+
+    if wdf.empty:
+        st.info(
+            "Nog geen wellness-data. Zet `GARMIN_EMAIL` en `GARMIN_PASSWORD` "
+            "in `.env` en klik in de zijbalk op **🔄 Nu synchroniseren** — "
+            "rustpols, HRV, slaap, body battery en training readiness komen "
+            "dan automatisch binnen (dagelijks bij te werken)."
+        )
+    else:
+        # -- Kerncijfers: laatste dag t.o.v. het 7-daags gemiddelde ---------
+        def _laatste_waarde(col: str):
+            """(dag, waarde, 7-daags gemiddelde ervóór) van de laatste dag met data."""
+            serie = wdf[["day", col]].dropna()
+            if serie.empty:
+                return None
+            dag, waarde = serie.iloc[-1]["day"], serie.iloc[-1][col]
+            venster = serie[(serie["day"] >= dag - pd.Timedelta(days=7))
+                            & (serie["day"] < dag)][col]
+            gem = venster.mean() if len(venster) >= 3 else None
+            return dag, waarde, gem
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        rp = _laatste_waarde("resting_hr")
+        k1.metric("Rustpols", f"{rp[1]:.0f} bpm" if rp else GEEN_WAARDE,
+                  delta=(f"{rp[1] - rp[2]:+.0f} vs 7d" if rp and rp[2] else None),
+                  delta_color="inverse",
+                  help="Lager is doorgaans beter herstel; vergelijk met het "
+                       "7-daags gemiddelde, niet met gisteren.")
+        hv = _laatste_waarde("hrv_last_night")
+        k2.metric("HRV (nacht)", f"{hv[1]:.0f} ms" if hv else GEEN_WAARDE,
+                  delta=(f"{hv[1] - hv[2]:+.0f} vs 7d" if hv and hv[2] else None),
+                  help="Nachtelijk gemiddelde. Hoger = doorgaans beter "
+                       "hersteld; binnen je persoonlijke baseline is alles "
+                       "goed.")
+        sl = _laatste_waarde("sleep_s")
+        k3.metric("Slaap", f"{int(sl[1] // 3600)}u{int(sl[1] % 3600 // 60):02d}"
+                  if sl else GEEN_WAARDE,
+                  delta=(f"{(sl[1] - sl[2]) / 3600:+.1f}u vs 7d"
+                         if sl and sl[2] else None),
+                  help="Totale slaapduur van de laatste nacht met data.")
+        bb = _laatste_waarde("body_battery_high")
+        k4.metric("Body battery (max)", f"{bb[1]:.0f}" if bb else GEEN_WAARDE,
+                  help="Hoogste stand van de dag — hoe ver je 's nachts "
+                       "hebt opgeladen.")
+        tr = _laatste_waarde("training_readiness")
+        k5.metric("Readiness", f"{tr[1]:.0f}" if tr else GEEN_WAARDE,
+                  help="Garmin's training readiness (0-100), o.a. uit slaap, "
+                       "HRV en recente belasting.")
+
+        # -- Periode + voortschrijdend gemiddelde ---------------------------
+        periodes = {"Laatste 30 dagen": 30, "Laatste 90 dagen": 90,
+                    "Laatste 180 dagen": 180, "Alles": None}
+        periode_keuze = st.selectbox("Periode", list(periodes), index=1)
+        dagen_terug = periodes[periode_keuze]
+        start_p = (date.today() - timedelta(days=dagen_terug)
+                   if dagen_terug else None)
+        sel = wellness.with_rolling(wellness.in_range(wdf, start_p, None))
+
+        # -- Hoofdgrafieken: rustpols en HRV --------------------------------
+        RUST_KLEUR, HRV_KLEUR = PAL["cats"][0], PAL["cats"][1]
+        for col, titel, eenheid, kleur, extra_band in (
+            ("resting_hr", "Rustpols", "bpm", RUST_KLEUR, False),
+            ("hrv_last_night", "HRV — nachtelijk gemiddelde", "ms", HRV_KLEUR, True),
+        ):
+            serie = sel.dropna(subset=[col])
+            if serie.empty:
+                continue
+            fig = go.Figure()
+            if extra_band:
+                # Persoonlijke Garmin-baseline als rustige band op de
+                # achtergrond: binnen de band = in balans.
+                band = sel.dropna(subset=["hrv_baseline_low", "hrv_baseline_high"])
+                if not band.empty:
+                    fig.add_trace(go.Scatter(
+                        x=band["day"], y=band["hrv_baseline_high"],
+                        line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                    fig.add_trace(go.Scatter(
+                        x=band["day"], y=band["hrv_baseline_low"],
+                        line=dict(width=0), fill="tonexty",
+                        fillcolor=with_alpha(kleur, 0.10),
+                        name="Persoonlijke baseline", hoverinfo="skip"))
+            fig.add_trace(go.Scatter(
+                x=serie["day"], y=serie[col], mode="markers",
+                marker=dict(size=5, color=with_alpha(kleur, 0.35)),
+                name="Per dag",
+                hovertemplate="%{x|%d-%m-%Y}: %{y:.0f} " + eenheid
+                              + "<extra></extra>"))
+            ma = sel.dropna(subset=[f"{col}_ma"]) if f"{col}_ma" in sel else pd.DataFrame()
+            if not ma.empty:
+                fig.add_trace(go.Scatter(
+                    x=ma["day"], y=ma[f"{col}_ma"], mode="lines",
+                    line=dict(color=kleur, width=3), name="7-daags gemiddelde",
+                    hovertemplate="%{x|%d-%m-%Y}: gem. %{y:.1f} " + eenheid
+                                  + "<extra></extra>"))
+            fig.update_layout(title=f"{titel} ({eenheid})")
+            date_xaxis(fig, serie["day"])
+            pad_single_point(fig, serie["day"], days=7)
+            chart(fig, key=f"herstel_{col}")
+
+        # -- Klein rooster: slaap, stress, body battery, readiness, VO2 max --
+        st.subheader("Overige maten")
+        klein = [
+            ("sleep_s", "Slaap (uren)", lambda s: s / 3600, "%{y:.1f} u"),
+            ("sleep_score", "Slaapscore", None, "%{y:.0f}"),
+            ("stress_avg", "Stress (daggemiddelde)", None, "%{y:.0f}"),
+            ("body_battery_high", "Body battery (max)", None, "%{y:.0f}"),
+            ("training_readiness", "Training readiness", None, "%{y:.0f}"),
+            ("vo2max_run", "VO2 max (lopen)", None, "%{y:.1f}"),
+            ("vo2max_bike", "VO2 max (fietsen)", None, "%{y:.1f}"),
+        ]
+        grid = st.columns(3)
+        paneel = 0
+        for col, titel, transform, yfmt in klein:
+            serie = sel[["day", col]].dropna()
+            if serie.empty:
+                continue
+            serie = serie.copy()
+            if transform:
+                serie[col] = transform(serie[col])
+            with grid[paneel % 3]:
+                fig = px.line(serie, x="day", y=col, markers=True,
+                              labels={"day": "", col: ""})
+                fig.update_traces(
+                    line=dict(color=PAL["cats"][paneel % len(PAL["cats"])]),
+                    marker=dict(size=6),
+                    hovertemplate="%{x|%d-%m-%Y} · " + yfmt + "<extra></extra>")
+                fig.update_layout(title=titel, height=240,
+                                  margin=dict(t=40, b=10, l=10, r=10))
+                date_xaxis(fig, serie["day"])
+                pad_single_point(fig, serie["day"], days=7)
+                st.plotly_chart(style_fig(fig, show_legend=False),
+                                width="stretch", config=PLOTLY_CONFIG,
+                                key=f"herstel_klein_{col}")
+            paneel += 1
+
+        # -- Kruising met de trainingsbelasting -----------------------------
+        herstel_pw = wellness.weekly_recovery(conn)
+        if not herstel_pw.empty and not acts.empty:
+            uren_pw = (weekly_volume(acts).groupby("week", as_index=False)
+                       ["uren"].sum())
+            kruis = herstel_pw.merge(uren_pw, on="week", how="inner")
+            if len(kruis) > 1:
+                st.subheader("Herstel naast trainingsbelasting")
+                st.caption(
+                    "Weekgemiddelden van rustpols en HRV boven de "
+                    "trainingsuren per week: zo zie je of je herstel "
+                    "meebeweegt met zware weken — en of hij op tijd "
+                    "terugveert. Structureel oplopende rustpols of dalende "
+                    "HRV bij hoog volume is het signaal om te remmen."
+                )
+                fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                    row_heights=[0.3, 0.3, 0.4],
+                                    vertical_spacing=0.07)
+                fig.add_trace(go.Scatter(
+                    x=kruis["week"], y=kruis["rustpols"], name="Rustpols (weekgem.)",
+                    line=dict(color=RUST_KLEUR, width=3), mode="lines+markers",
+                    hovertemplate="%{x}: %{y:.1f} bpm<extra></extra>"),
+                    row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=kruis["week"], y=kruis["hrv"], name="HRV (weekgem.)",
+                    line=dict(color=HRV_KLEUR, width=3), mode="lines+markers",
+                    hovertemplate="%{x}: %{y:.1f} ms<extra></extra>"),
+                    row=2, col=1)
+                fig.add_trace(go.Bar(
+                    x=kruis["week"], y=kruis["uren"], name="Trainingsuren/week",
+                    marker_color=with_alpha(PAL["cats"][2], 0.6),
+                    hovertemplate="%{x}: %{y:.1f} u<extra></extra>"),
+                    row=3, col=1)
+                fig.update_yaxes(title_text="bpm", row=1, col=1)
+                fig.update_yaxes(title_text="ms", row=2, col=1)
+                fig.update_yaxes(title_text="uren", row=3, col=1)
+                fig.update_xaxes(title_text="Week", row=3, col=1)
+                fig.update_layout(hovermode="x unified")
+                chart(fig, key="herstel_kruising")
 
 # ------------------------------------------------------------------- coach --
 with tab_coach:
@@ -2982,6 +3346,43 @@ with tab_settings:
         "als referentie op de 🏊 Zwemmen-tab."
     )
 
+    st.subheader("🔄 Garmin-sync")
+    garmin_cfg = config.get("garmin", {})
+    st.caption(
+        "De inloggegevens staan in `.env` (`GARMIN_EMAIL`, `GARMIN_PASSWORD`) "
+        "— nooit in dit bestand. Na de eerste login bewaart de app tokens in "
+        "`data/garmin_tokens/`; beide blijven buiten git."
+    )
+    g1, g2, g3 = st.columns(3)
+    new_auto_sync = g1.toggle(
+        "Automatisch syncen bij openen", value=bool(garmin_cfg.get("auto_sync", True)),
+        help="Bij het laden van het dashboard stilletjes syncen als de "
+             "vorige sync oud genoeg is. Werkt alleen met bewaarde tokens; "
+             "er wordt nooit ongevraagd een login of MFA gestart.")
+    new_sync_hours = g2.number_input(
+        "Minimaal aantal uren tussen auto-syncs", min_value=1, max_value=48,
+        value=int(garmin_cfg.get("auto_sync_hours", 6)))
+    new_activities_days = g3.number_input(
+        "Activiteiten: dagen terugkijken", min_value=1, max_value=90,
+        value=int(garmin_cfg.get("activities_days", 14)),
+        help="Hoe ver de activiteiten-sync terugkijkt. Alles wat al bekend "
+             "is (ook handmatig geüpload of verwijderd) wordt overgeslagen.")
+    email_aanwezig, ww_aanwezig = garmin_sync.credentials()
+    status_delen = [
+        ("✅" if email_aanwezig else "❌") + " GARMIN_EMAIL in .env",
+        ("✅" if ww_aanwezig else "❌") + " GARMIN_PASSWORD in .env",
+        ("✅ tokens bewaard" if garmin_sync.has_tokens() else "❌ nog geen tokens"),
+    ]
+    st.caption("Status: " + " · ".join(status_delen))
+    if garmin_sync.has_tokens() and st.button(
+            "🔌 Koppeling verwijderen (tokens wissen)",
+            help="Wist de bewaarde login-tokens; bij de volgende sync moet "
+                 "er opnieuw ingelogd worden."):
+        garmin_sync.logout()
+        st.toast("Garmin-tokens gewist.")
+        st.rerun()
+
+    st.divider()
     st.subheader("🤖 LLM")
     c1, c2, c3 = st.columns(3)
     new_host = c1.text_input("Ollama host", config["llm"]["ollama"]["host"])
@@ -3026,6 +3427,12 @@ with tab_settings:
         new_config["llm"]["ollama"]["model"] = new_ollama_model.strip()
         new_config["llm"]["anthropic"]["model"] = new_anthropic_model.strip()
         new_config["llm"]["routing"] = new_routing
+        new_config["garmin"] = {
+            **config.get("garmin", {}),
+            "auto_sync": bool(new_auto_sync),
+            "auto_sync_hours": int(new_sync_hours),
+            "activities_days": int(new_activities_days),
+        }
         save_config(new_config)
 
         # Profielwaarden leesbaar spiegelen naar doelen.md met changelog.

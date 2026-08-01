@@ -58,6 +58,7 @@ from tricoach.storage import (
 )
 from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
 from tricoach.trainingslog import kerncijfers, zone_regel
+from tricoach.wellness import recovery_snapshot as wellness_snapshot
 from tricoach.sportzones import (
     METHOD_NONE,
     ftp as athlete_ftp,
@@ -649,6 +650,59 @@ def recent_load_block(conn: sqlite3.Connection, act: ParsedActivity,
     return "\n".join(regels)
 
 
+def recovery_block(conn: sqlite3.Connection, act: ParsedActivity) -> str | None:
+    """Herstelcontext uit de Garmin wellness-data: rustpols en HRV t.o.v. het
+    7-daags gemiddelde, slaap en training readiness.
+
+    Bewust compact en zonder oordeel: de systeemprompt instrueert het model
+    dit als context te wegen (meerdaagse trend telt, dagruis niet) en er geen
+    medische duiding aan te geven. None zolang er geen (actuele) wellness-data
+    is — de feedback gaat dan gewoon zonder dit blok door.
+    """
+    try:
+        snap = wellness_snapshot(conn, on_day=_local(pd.Timestamp(
+            act.start_time)).date())
+    except Exception:
+        return None
+    if snap is None:
+        return None
+
+    regels = []
+    if snap["rustpols"] is not None:
+        regel = f"- Rustpols: {snap['rustpols']:.0f} bpm"
+        if snap["rustpols_7d"] is not None:
+            regel += f" (7-daags gemiddelde {snap['rustpols_7d']:.0f})"
+        regels.append(regel)
+    if snap["hrv"] is not None:
+        regel = f"- HRV (nachtgemiddelde): {snap['hrv']:.0f} ms"
+        extra = []
+        if snap["hrv_7d"] is not None:
+            extra.append(f"7-daags gemiddelde {snap['hrv_7d']:.0f} ms")
+        if snap["hrv_status"]:
+            extra.append(f"status {snap['hrv_status']}")
+        if snap["hrv_baseline_low"] and snap["hrv_baseline_high"]:
+            extra.append(f"baseline {snap['hrv_baseline_low']:.0f}–"
+                         f"{snap['hrv_baseline_high']:.0f} ms")
+        if extra:
+            regel += f" ({', '.join(extra)})"
+        regels.append(regel)
+    if snap["slaap_s"] is not None:
+        uren = snap["slaap_s"] / 3600
+        regel = f"- Slaap afgelopen nacht: {int(uren)}u{int(uren % 1 * 60):02d}"
+        if snap["slaap_score"] is not None:
+            regel += f", score {snap['slaap_score']:.0f}"
+        regels.append(regel)
+    if snap["readiness"] is not None:
+        regel = f"- Training readiness: {snap['readiness']:.0f}"
+        if snap["readiness_level"]:
+            regel += f" ({snap['readiness_level']})"
+        regels.append(regel)
+    if not regels:
+        return None
+    regels.insert(0, f"Stand van {snap['dag']:%a %d-%m} (Garmin wellness):")
+    return "\n".join(regels)
+
+
 def recent_notes_block(conn: sqlite3.Connection, act: ParsedActivity,
                        days: int = NOTES_DAYS) -> str | None:
     """Vrije opmerkingen van de atleet uit recente sessies (ziekte, moe, materiaal).
@@ -842,6 +896,12 @@ def build_feedback_context(
         f"# Recente belasting (laatste {LOAD_DAYS} dagen)\n\n"
         + recent_load_block(conn, act)
     )
+    herstel = recovery_block(conn, act)
+    if herstel:
+        blocks.append(
+            "# Herstelcontext (Garmin wellness — context, geen oordeel; "
+            "weeg de meerdaagse trend, niet de losse dag)\n\n" + herstel
+        )
     noten = recent_notes_block(conn, act)
     if noten:
         blocks.append(

@@ -1,5 +1,7 @@
 # Secrets en API-sleutels
 .env
+# Garmin OAuth-tokens (staan in data/, dit is een extra vangnet)
+garmin_tokens/
 
 # Persoonlijke data (trainingen, gezondheid, geheugen). FIT-bestanden
 # bevatten GPS-routes vanaf huis, hartslag- en gezondheidsdata — die horen

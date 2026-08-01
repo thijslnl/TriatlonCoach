@@ -84,6 +84,11 @@ llm:
     trends: anthropic
     feedback: anthropic
     body_trend: ollama
+garmin:
+  auto_sync: true
+  auto_sync_hours: 6
+  wellness_days: 30
+  activities_days: 14
 paths:
   database: data/training.db
   memory_dir: memory

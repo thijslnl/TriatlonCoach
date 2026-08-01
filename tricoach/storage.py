@@ -168,6 +168,10 @@ _ADDED_COLUMNS = {
     # archief) zodat verificatieruns die sessies kunnen overslaan.
     "archived_path": "TEXT",
     "original_missing": "INTEGER",
+    # Garmin activity-ID (zie tricoach.garmin_sync): dedupliceert de
+    # automatische sync tegen handmatige uploads vóór het downloaden. Wordt
+    # gevuld door de sync en teruggevuld uit de upload-bestandsnamen.
+    "garmin_activity_id": "TEXT",
 }
 
 

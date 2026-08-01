@@ -116,6 +116,22 @@ SYSTEM = (
     "- Verzin niets. Ontbreekt data, benoem dat of laat het weg. Baseer je "
     "nooit op aannames die niet in de context staan.\n"
     "\n"
+    "Herstelcontext (rustpols, HRV, slaap, training readiness uit Garmin), "
+    "als die in de context staat:\n"
+    "- Dit is CONTEXT, geen oordeel. Een verhoogde rustpols of lage HRV na "
+    "een zware dag is normaal en verwacht; het wordt pas interessant als het "
+    "meerdere dagen aanhoudt. Vergelijk altijd met het 7-daags gemiddelde, "
+    "nooit met de losse score van vanochtend, en fixeer niet op dagcijfers — "
+    "trends over weken tellen.\n"
+    "- Weeg het mee in de vooruitblik. Staan rustpols én HRV meerdere dagen "
+    "ongunstig terwijl er een zware sessie gepland staat, dan mag je "
+    "voorstellen die in te korten of te verschuiven. Dit is bewust: de "
+    "bekende valkuil van de atleet is te veel stapelen en niet op tijd "
+    "remmen — deze data is de objectieve tegenkracht daarvoor.\n"
+    "- Geen medische duiding. Dit is trainingscontext, geen diagnose. Bij "
+    "aanhoudend afwijkende waarden mag je hooguit vriendelijk suggereren "
+    "rustig aan te doen of een professional te raadplegen.\n"
+    "\n"
     "Sport-specifieke regels:\n"
     "- Hardlopen: hartslag is de leidende maat, op de loop-LTHR (%LTHR). Zone "
     "2-discipline is centraal. HR-drift (eerste vs tweede helft) als "
@@ -250,6 +266,46 @@ class Feedback:
     aanpassing: str | None   # None = volgende sessie ongewijzigd
 
 
+# Feedback ook in de database, gekoppeld aan de sessie: zo is de coaching bij
+# elke sessie terug te lezen (Sessie-tab), ook voor automatisch gesyncte
+# activiteiten waar niemand de upload-flits zag. Alleen vanaf nu — oude
+# feedback staat alleen in memory/feedback.md.
+FEEDBACK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_feedback (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_key TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    feedback     TEXT NOT NULL,
+    aanpassing   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_key ON session_feedback(activity_key);
+"""
+
+
+def record_feedback(conn: sqlite3.Connection, fb: Feedback) -> None:
+    """Bewaar één feedback-ronde in de database (naast memory/feedback.md)."""
+    conn.executescript(FEEDBACK_SCHEMA)
+    conn.execute(
+        "INSERT INTO session_feedback (activity_key, created_at, feedback, "
+        "aanpassing) VALUES (?, ?, ?, ?)",
+        (fb.activity_key, datetime.now().isoformat(timespec="seconds"),
+         fb.feedback, fb.aanpassing),
+    )
+    conn.commit()
+
+
+def load_session_feedback(conn: sqlite3.Connection, activity_key: str) -> list[dict]:
+    """De bewaarde feedback van één sessie (oudste eerst), voor de Sessie-tab."""
+    conn.executescript(FEEDBACK_SCHEMA)
+    rows = conn.execute(
+        "SELECT created_at, feedback, aanpassing FROM session_feedback "
+        "WHERE activity_key = ? ORDER BY created_at",
+        (activity_key,),
+    ).fetchall()
+    return [{"created_at": r[0], "feedback": r[1], "aanpassing": r[2]}
+            for r in rows]
+
+
 def last_proposed_adjustment(memory_dir: Path) -> str | None:
     """De laatst voorgestelde aanpassing uit feedback.md (voor de adherence-check).
 
@@ -337,6 +393,7 @@ def generate_feedback(
     )
     _append_feedback_md(memory_dir, act, fb, user_note=user_note, wind=wind,
                         training_label=training_label)
+    record_feedback(conn, fb)
     if aanpassing:
         _append_advies_md(memory_dir, act, aanpassing)
     return fb
