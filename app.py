@@ -1053,7 +1053,8 @@ with tab_overzicht:
             "km": st.column_config.NumberColumn("Km totaal", format="%.0f"),
             "trimp": st.column_config.NumberColumn(
                 "TRIMP", format="%.0f",
-                help="Totale trainingsbelasting van de week (tijd × zonegewicht)."),
+                help="Totale trainingsbelasting van de week (tijd × zonegewicht; "
+                     "zwemmen op basis van de gemiddelde hartslag)."),
         },
         hide_index=True, width="stretch",
     )
@@ -1303,7 +1304,9 @@ with tab_voortgang:
     chart(fig)
     st.caption(
         "Elke sessie krijgt een TRIMP-score uit de tijd per hartslagzone "
-        "(zone 1 telt 1×, zone 5 telt 5× per minuut). De fitheidslijn moet "
+        "(zone 1 telt 1×, zone 5 telt 5× per minuut); zwemmen — bewust "
+        "zonder zones — telt mee via de gemiddelde hartslag (Banister). "
+        "De fitheidslijn moet "
         "gestaag stijgen, met de vermoeidheidslijn er niet te ver bovenuit. "
         "**Vorm (TSB)** = fitheid − vermoeidheid: rond de race wil je dit "
         "positief hebben. **ACWR** hoort in de groene band (0,8–1,3): "

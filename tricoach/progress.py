@@ -3,7 +3,8 @@
 Vier blokken, allemaal gevoed door de SQLite-data:
 
 - **Belasting (TRIMP/CTL/ATL/ACWR)**: elke sessie krijgt een belastingsscore
-  uit de tijd per hartslagzone. Daaruit volgen een fitheidslijn (CTL, traag
+  uit de tijd per hartslagzone; zwemmen (bewust zonder zones) via een
+  Banister-TRIMP op de gemiddelde hartslag. Daaruit volgen een fitheidslijn (CTL, traag
   voortschrijdend gemiddelde), een vermoeidheidslijn (ATL, snel) en hun
   verhouding (ACWR) als signaal voor verantwoorde opbouw.
 - **Efficiëntie**: efficiency factor (meters per minuut per hartslag) en
@@ -21,10 +22,13 @@ import sqlite3
 import numpy as np
 import pandas as pd
 
+from tricoach.config import load_config, resolve_path
 from tricoach.formatting import derive_speed_ms
 from tricoach.power import estimate_ftp, power_decoupling_trend, power_trend
-from tricoach.storage import load_lengths, load_records
+from tricoach.sportzones import run_lthr, zone_pcts
+from tricoach.storage import connect, load_lengths, load_records
 from tricoach.swim import SWOLF_FILTER_LABEL, crawl_swolf
+from tricoach.zones import bounds_from_lthr
 
 
 def swim_speed_ms(conn: sqlite3.Connection, act: pd.Series) -> float | None:
@@ -45,6 +49,19 @@ def swim_speed_ms(conn: sqlite3.Connection, act: pd.Series) -> float | None:
 # Gewicht per hartslagzone voor de TRIMP-score (minuten × gewicht).
 TRIMP_WEIGHTS = {"z1_s": 1, "z2_s": 2, "z3_s": 3, "z4_s": 4, "z5_s": 5}
 
+# Zwemmen krijgt bewust geen hartslagzones (zie tricoach.sportzones): daar
+# sturen we op techniek, afstand en tempo. Maar de *belasting* moet wél in
+# CTL/ATL meetellen, anders is een pittige zwemtraining voor het model
+# onzichtbaar. Daarom voor zwemsessies een Banister-TRIMP op de gemiddelde
+# hartslag: minuten × HRR × 0,64 × e^(1,92 × HRR), met HRR = (HR − rust) /
+# (max − rust). Banister rekent op een andere schaal dan de zonegewichten
+# (1–5 per minuut); de ijkfactor uit swim_trimp_params legt beide schalen op
+# elkaar op de Z2/Z3-grens van het lopen (gewicht 2,5). De loopzones dienen
+# daarbij alleen als ijkpunt voor de schaal, niet als zone-oordeel over het
+# zwemmen.
+SWIM_REST_HR_FALLBACK = 60   # bpm, zolang er geen Garmin-rustpols bekend is
+SWIM_TRIMP_MIDWEIGHT = 2.5   # zonegewicht op de Z2/Z3-grens (tussen 2 en 3)
+
 CTL_TAU = 42  # dagen; fitheid reageert traag
 ATL_TAU = 7   # dagen; vermoeidheid reageert snel
 
@@ -54,10 +71,64 @@ RIEGEL = 1.06
 
 # ------------------------------------------------------------- belasting --
 
+def _banister_per_min(hrr: float) -> float:
+    """Banister-TRIMP per minuut bij een gegeven hartslagreserve-fractie."""
+    return hrr * 0.64 * math.exp(1.92 * hrr)
+
+
+def _recent_resting_hr() -> float | None:
+    """Gemiddelde Garmin-rustpols over de laatste 30 dagen, of None."""
+    try:
+        conn = connect(resolve_path(load_config(), "database"))
+        try:
+            rij = conn.execute(
+                "SELECT AVG(resting_hr) FROM wellness "
+                "WHERE resting_hr IS NOT NULL AND day >= date('now', '-30 days')"
+            ).fetchone()
+        finally:
+            conn.close()
+        return float(rij[0]) if rij and rij[0] else None
+    except Exception:
+        return None
+
+
+def swim_trimp_params() -> tuple[float, float, float]:
+    """(rustpols, max-HR, ijkfactor) voor de zwem-TRIMP.
+
+    De rustpols komt uit de Garmin-wellnessdata (30-daags gemiddelde), de
+    max-HR uit de config. De ijkfactor schaalt de Banister-formule zó dat
+    zwemmen op de hartslag van de Z2/Z3-grens van het lopen even zwaar telt
+    als lopen daar (:data:`SWIM_TRIMP_MIDWEIGHT` per minuut).
+    """
+    athlete = load_config().get("athlete") or {}
+    max_hr = float(athlete.get("max_hr") or 190)
+    rust = float(_recent_resting_hr() or SWIM_REST_HR_FALLBACK)
+    rust = min(rust, max_hr - 20)  # tegen onzinnige configwaarden
+    grens = bounds_from_lthr(run_lthr(athlete), zone_pcts(athlete))[1]
+    hrr = min(max((grens - rust) / (max_hr - rust), 0.05), 1.0)
+    return rust, max_hr, SWIM_TRIMP_MIDWEIGHT / _banister_per_min(hrr)
+
+
 def trimp_per_session(acts: pd.DataFrame) -> pd.DataFrame:
-    """TRIMP-score per sessie (kolommen: start_time, sport, trimp)."""
+    """TRIMP-score per sessie (kolommen: start_time, sport, trimp).
+
+    Sporten met hartslagzones: minuten per zone × zonegewicht. Zwemmen heeft
+    bewust geen zones en krijgt een Banister-TRIMP op de gemiddelde hartslag
+    over de actieve tijd (rust aan de kant telt niet mee); een zwemsessie
+    zonder hartslagdata blijft op 0 staan.
+    """
     df = acts.copy()
     df["trimp"] = sum(df[col].fillna(0) / 60 * w for col, w in TRIMP_WEIGHTS.items())
+    if "avg_hr" in df:
+        zwem = df["sport"].eq("swimming") & df["avg_hr"].notna()
+        if zwem.any():
+            rust, max_hr, factor = swim_trimp_params()
+            actief = (df["active_s"] if "active_s" in df
+                      else pd.Series(np.nan, index=df.index))
+            minuten = actief.where(actief > 0, df["duration_s"]) / 60
+            hrr = ((df["avg_hr"] - rust) / (max_hr - rust)).clip(0.0, 1.0)
+            banister = hrr * 0.64 * np.exp(1.92 * hrr)
+            df.loc[zwem, "trimp"] = (minuten * banister * factor)[zwem]
     return df[["start_time", "sport", "trimp"]]
 
 
