@@ -187,3 +187,14 @@ def sport_label(sport: str) -> str:
 def stroke_label(stroke: str) -> str:
     """Engelse FIT-slagnaam -> Nederlands label."""
     return STROKE_NL.get(stroke, stroke)
+
+
+def fmt_aantal(n: int | float | None) -> str:
+    """Geheel getal met een punt als duizendtalscheiding (24340 -> '24.340').
+
+    De UI is Nederlands; de Python-standaard ``f"{n:,}"`` levert een komma op
+    en leest daar als een decimaalteken.
+    """
+    if _ongeldig(n):
+        return GEEN_WAARDE
+    return f"{int(round(float(n))):,}".replace(",", ".")

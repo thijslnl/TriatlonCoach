@@ -68,7 +68,13 @@ kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
    (Anthropic API; het laatste advies blijft bewaard).
 5. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
    Ollama-model; zet de toggle aan om de cloud-coach te vragen.
-6. **Instellingen** — racedata (naam, datum), de **drempels per sport**
+6. **Heatmap** — voor de lol: alle GPS-tracks die je ooit hebt gefietst,
+   gelopen en open water gezwommen op één donkere kaart (CartoDB Dark Matter),
+   feller waar je vaker langskwam. Filterbaar op sport en periode, met een
+   **privacyzone** rond je huisadres die standaard aan staat. Zie
+   [de heatmap](#de-heatmap) hieronder — met name waarom de dichtheid over
+   afstand en niet over tijd wordt geteld.
+7. **Instellingen** — racedata (naam, datum), de **drempels per sport**
    (loop-LTHR, FTP en fiets-LTHR), Ollama-host
    en -model, en de LLM-routing per taak. Onderaan staat het verbruik:
    aanroepen, tokens en geschatte Anthropic-kosten (geparset uit
@@ -100,6 +106,8 @@ tricoach/
   importer.py           de import-pipeline (parse -> archief -> opslaan -> log)
   archive.py            origineel-archief van uploads (uploads/yyyy/mm/, versies)
   transport.py          transport-markering (ritje naar het zwembad ≠ training)
+  heatmap.py            GPS-heatmap: extractie uit het FIT-archief, herbemonstering
+                        op vaste afstand, dichtheid per rastercel, privacyzone
   trainingslog.py       markdown-entries in memory/trainingslog.md
   analysis.py           weekvolumes, zonetijden, tempo-bij-HR-trends
   schedule.py           aanpasbaar weekschema (memory/weekschema.md)
@@ -119,6 +127,9 @@ data/training.db        SQLite met de ruwe sessie- en seconde-data, de
                         wellness-dagen, de bewaarde coach-feedback per sessie
                         (session_feedback) en de sync-status
 data/garmin_tokens/     OAuth-tokens van de Garmin-login (buiten git)
+data/heatmap_privacy.json  middelpunt en straal van de privacyzone van de
+                        heatmap — bewust hier en niet in config.yaml, want dat
+                        staat in versiebeheer en het middelpunt is je huisadres
 uploads/                onveranderlijk archief van elk geüpload FIT-origineel
                         (uploads/yyyy/mm/yyyy-mm-dd_HHmm_<activityid>.fit;
                         heruploads met andere inhoud worden _v2, _v3, ...)
@@ -129,6 +140,71 @@ tests/                  losse testscripts (python tests/test_<naam>.py, draaien
                         test_parse/test_import/test_uitbreiding lezen wél
                         garmin_import/ en verwachten de projectroot als werkmap)
 ```
+
+## De heatmap
+
+Een eigen Strava-achtige heatmap van alle GPS-tracks
+([tricoach/heatmap.py](tricoach/heatmap.py), tab **🗺️ Heatmap**). Geen
+trainingsanalyse — transport-ritjes tellen hier dus mee, want het gaat om waar
+je komt, niet om de trainingsprikkel.
+
+**Lijndichtheid, niet puntdichtheid.** Dit is de hele truc. Het horloge logt
+per seconde, dus waar je langzaam gaat — stoplichten, een klim, wachten bij een
+oversteek — stapelen de punten zich op. Een heatmap die ruwe GPS-punten telt
+licht daar fel op terwijl je er niet vaker was: op de eigen data komt zo'n
+enkele stilstand op **320 punten in één rastercel** uit, terwijl een tien keer
+gereden route op 10 komt. Het stoplicht zou dus feller zijn dan de dagelijkse
+woon-werkroute — precies verkeerd. Daarom wordt elke track vóór het tellen
+**herbemonsterd naar punten op vaste afstand** (elke 10 m, met interpolatie
+tussen de gelogde punten). Elke gereden meter weegt dan even zwaar; tien
+minuten stilstaan levert één punt op. Sprongen groter dan 500 m (pauze,
+autorit) worden niet overbrugd, zodat er geen kaarsrechte spooklijnen ontstaan.
+
+Daarna wordt per rastercel (standaard 20 m) het aantal **passages** geteld:
+opeenvolgende punten in dezelfde cel binnen één track gelden als één passage,
+een latere terugkomst als een nieuwe. Daarmee maakt ook de hoek waaronder je
+een cel kruist niet meer uit.
+
+**Kleurschaal.** Van dof donkerrood (één passage) via oranje en geel naar wit,
+en nooit lineair — één dagelijkse route zou anders al het andere tot vlak boven
+zwart platdrukken. Twee schalen, die een andere vraag beantwoorden:
+
+| Schaal | Wat je ziet |
+|---|---|
+| logaritmisch (standaard) | de verhoudingen tussen aantallen blijven herkenbaar; een route van tien keer is duidelijk feller dan een van twee keer |
+| percentiel | álles wat je meer dan één keer deed springt ver naar boven; antwoordt op "waar kom ik vaker dan eens", ten koste van het onderscheid in de top |
+
+**Cache.** De coördinaten komen uit de originele FIT-bestanden in `uploads/`
+(de `records`-tabel bewaart geen posities). FIT slaat posities op in
+*semicircles*: `graden = semicircles × 180 / 2³¹`. De herbemonsterde punten
+gaan in `track_points`, met per activiteit een regel in `track_extract` — ook
+voor sessies **zonder** GPS, zodat een zwembadsessie of Zwift-rit niet bij elke
+render opnieuw wordt opengetrokken. Elk FIT-bestand wordt dus één keer geparst;
+bij het openen van de tab worden alleen nieuwe activiteiten bijgewerkt.
+
+**Beginbeeld.** De kaart opent op het gebied waar minstens 90% van je
+rastercellen ligt, niet op de volledige bounding box — een enkel hardloopje in
+het buitenland zou de kaart anders naar landniveau uitzoomen en je eigen
+omgeving tot een vlekje maken. Die verre routes staan er nog steeds: ze vallen
+alleen buiten het startbeeld, en uitzoomen brengt ze terug (de UI meldt hoeveel
+cellen dat zijn). Symmetrisch quantielen afknippen werkt daar slecht — ligt een
+verre groep net boven de toegestane fractie, dan schuift de grens er middenin en
+blijft de kaart even ver uitgezoomd. Daarom trekt `view_bounds` per stap de rand
+in die de meeste kaartbreedte per opgegeven cel oplevert: een compacte verre
+groep verdwijnt zo in één keer, terwijl een gelijkmatig uitgesmeerde spreiding
+grotendeels in beeld blijft.
+
+**Privacy.** Tracks beginnen en eindigen bij de voordeur. De privacyzone
+(instelbaar middelpunt, standaard 400 m straal) laat punten daarbinnen weg en
+staat standaard aan; de routes lopen gewoon door tot de rand van de zone. Het
+middelpunt wordt opgeslagen in `data/heatmap_privacy.json` en **niet** in
+config.yaml: dat laatste staat in versiebeheer, en het middelpunt *is* het
+huisadres. Is er nog niets opgeslagen, dan gebruikt de zone een schatting uit
+de mediaan van alle startpunten.
+
+De kaartachtergrond is CartoDB Dark Matter (gratis, geen API-key) via pydeck;
+de vereiste bronvermelding — OpenStreetMap-contributors en CARTO — staat onder
+de kaart in de UI.
 
 ## Drempels en zones per sport
 

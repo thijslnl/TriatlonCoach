@@ -15,10 +15,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import pydeck as pdk
 import streamlit as st
 import dotenv
 
 from tricoach import body
+from tricoach import heatmap as heatmap_mod
 from tricoach import garmin_sync
 from tricoach import wellness
 from tricoach import profile as profile_mod
@@ -47,12 +49,13 @@ from tricoach.combos import (
     run_transition_analysis,
     set_combo_status,
 )
-from tricoach.config import load_config, resolve_path
+from tricoach.config import PROJECT_ROOT, load_config, resolve_path
 from tricoach.feedback import generate_feedback, load_session_feedback
 from tricoach.formatting import (
     GEEN_WAARDE,
     effective_speed_ms,
     fmt_duration,
+    fmt_aantal,
     fmt_hours_hhmm,
     local_time,
     sessie_tempo,
@@ -641,6 +644,33 @@ def cache_ftp_estimate(versie: tuple) -> dict | None:
     return estimate_ftp(conn, trainingen)
 
 
+# De heatmap heeft een eigen cachesleutel: niet de sessiestand maar de stand
+# van de trackcache (zie tricoach.heatmap.cache_stats). Die verandert alleen
+# als er GPS is bijgekomen, dus filteren en inzoomen kost geen herberekening.
+@st.cache_data(show_spinner=False)
+def cache_track_points(hm_versie: tuple) -> pd.DataFrame:
+    """Alle gecachede trackpunten met hun sessiecontext (sport, datum, markeringen)."""
+    c = get_conn()
+    try:
+        return heatmap_mod.load_track_points(c, tz=TZ)
+    finally:
+        c.close()
+
+
+@st.cache_data(show_spinner=False)
+def cache_heatmap_cells(hm_versie: tuple, filters: tuple, cell_m: float,
+                        schaal: str, zone: tuple) -> pd.DataFrame:
+    """Gekleurde rastercellen voor de huidige filters (zie tricoach.heatmap)."""
+    punten = cache_track_points(hm_versie)
+    categorieen, start, eind, met_transport, met_verwijderd = filters
+    punten = heatmap_mod.filter_points(
+        punten, categories=categorieen, start=start, end=eind,
+        include_transport=met_transport, include_deleted=met_verwijderd)
+    if zone[0] is not None:
+        punten = heatmap_mod.apply_privacy_zone(punten, zone[0], zone[1], zone[2])
+    return heatmap_mod.heatmap_cells(punten, cell_m=cell_m, method=schaal)
+
+
 def render_upload_feedback():
     """Toon de feedback van de zojuist geüploade sessies prominent bovenaan.
 
@@ -733,11 +763,11 @@ render_transport_suggesties()
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
- tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_coach, tab_chat, tab_log,
- tab_settings) = st.tabs(
+ tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_coach, tab_chat,
+ tab_heatmap, tab_log, tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
      "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🧠 Coach", "💬 Chat",
-     "📖 Logboek", "⚙️ Instellingen"]
+     "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -3176,6 +3206,275 @@ with tab_chat:
             antwoord = f"Er ging iets mis: {e}"
         st.chat_message("assistant").write(f"{antwoord}\n\n_— {bron}_")
         st.session_state.chat_history.append((vraag, antwoord, bron))
+
+# ----------------------------------------------------------------- heatmap --
+# Voor de lol, geen trainingsanalyse: alle GPS-tracks op één donkere kaart,
+# feller waar vaker gereden/gelopen. De rekenketen zit in tricoach.heatmap;
+# hier staat alleen de UI en de caching eromheen.
+with tab_heatmap:
+    st.subheader("🗺️ Mijn heatmap")
+    st.caption(
+        "Alle routes die je ooit hebt gefietst, gelopen en open water gezwommen. "
+        "Feller = vaker langsgekomen. De dichtheid wordt geteld over punten op "
+        "**vaste afstand** (elke 10 m), niet per seconde: waar je stilstaat "
+        "voor een stoplicht licht de kaart dus níet onterecht op."
+    )
+
+    # -- trackcache bijwerken: alleen nieuwe activiteiten worden geparst ------
+    conn_hm = get_conn()
+    try:
+        heatmap_mod.prune_track_cache(conn_hm)
+        nog_te_doen = len(heatmap_mod.pending_activities(conn_hm))
+        if nog_te_doen:
+            balk = st.progress(0.0, text="GPS uit de FIT-bestanden lezen...")
+
+            def _voortgang(gedaan: int, totaal: int, label: str) -> None:
+                balk.progress(gedaan / max(totaal, 1),
+                              text=f"GPS inlezen ({gedaan}/{totaal}) — {label}")
+
+            telling = heatmap_mod.refresh_track_cache(conn_hm, progress=_voortgang)
+            balk.empty()
+            st.success(
+                f"{telling[heatmap_mod.STATUS_OK]} nieuwe tracks ingelezen "
+                f"({fmt_aantal(telling['punten'])} punten)."
+                + (f" {telling[heatmap_mod.STATUS_NO_GPS]} sessies zonder GPS "
+                   "overgeslagen (banenzwemmen/indoor)."
+                   if telling[heatmap_mod.STATUS_NO_GPS] else "")
+                + (f" {telling[heatmap_mod.STATUS_ERROR]} onleesbaar."
+                   if telling[heatmap_mod.STATUS_ERROR] else "")
+            )
+            cache_track_points.clear()
+            cache_heatmap_cells.clear()
+        hm_stats = heatmap_mod.cache_stats(conn_hm)
+    finally:
+        conn_hm.close()
+
+    HM_VERSIE = (hm_stats.get(heatmap_mod.STATUS_OK, 0), hm_stats["punten"],
+                 hm_stats.get("laatst"))
+    alle_punten = cache_track_points(HM_VERSIE)
+
+    if alle_punten.empty:
+        st.info(
+            "Nog geen GPS-tracks in de cache. Die komen uit de originele "
+            "FIT-bestanden in het archief (uploads/); sessies van vóór het "
+            "archief en zwembadsessies hebben geen bruikbare GPS."
+        )
+    else:
+        # -- filters ---------------------------------------------------------
+        aanwezig = [label for label in heatmap_mod.SPORT_CATEGORIES
+                    if label in set(alle_punten["categorie"])]
+        f1, f2, f3 = st.columns([2, 2, 1.4])
+        gekozen_sporten = f1.multiselect(
+            "Sport", aanwezig, default=aanwezig, key="hm_sporten",
+            help="Banenzwemmen staat er niet bij: dat heeft geen GPS.")
+        datum_min, datum_max = alle_punten["datum"].min(), alle_punten["datum"].max()
+        periode = f2.date_input(
+            "Periode", value=(datum_min, datum_max),
+            min_value=datum_min, max_value=datum_max, key="hm_periode",
+            help="Zo zie je hoe je actieradius zich over de maanden ontwikkelt.")
+        schaal = f3.selectbox(
+            "Kleurschaal", [heatmap_mod.SCALE_LOG, heatmap_mod.SCALE_PERCENTILE],
+            key="hm_schaal",
+            help="Logaritmisch houdt de verhoudingen herkenbaar; percentiel "
+                 "licht álles wat je meer dan één keer deed sterk uit. "
+                 "Lineair zou de woon-werkroute al het andere wegdrukken.")
+
+        o1, o2, o3 = st.columns([1.4, 1.4, 1.4])
+        met_transport = o1.toggle(
+            "Transport meetellen", value=True, key="hm_transport",
+            help="Voor een heatmap gaat het om waar je komt, niet om de "
+                 "trainingsprikkel — daarom standaard aan.")
+        met_verwijderd = o2.toggle(
+            "Verwijderde sessies meetellen", value=False, key="hm_verwijderd",
+            help="Soft-deleted sessies blijven standaard van de kaart.")
+        cel_m = o3.select_slider(
+            "Rasterfijnheid (m)", options=[10, 15, 20, 30, 50], value=20,
+            key="hm_cel",
+            help="Kleiner = fijnere lijnen maar meer gevoelig voor GPS-ruis "
+                 "(dezelfde route valt dan in verschillende cellen).")
+
+        # -- privacyzone -----------------------------------------------------
+        zone_cfg = heatmap_mod.privacy_settings(config)
+        voorstel = heatmap_mod.suggest_home(alle_punten)
+        # De kop moet de stand tonen die nú op de kaart geldt, niet de laatst
+        # opgeslagen: de toggle werkt meteen en het middelpunt valt terug op de
+        # schatting zolang er niets is opgeslagen. De actuele widgetwaarden
+        # staan in session_state zodra ze één keer getekend zijn; bij de eerste
+        # render gelden de opgeslagen waarden.
+        zone_aan_nu = st.session_state.get("hm_zone_aan", zone_cfg["enabled"])
+        zone_radius_nu = st.session_state.get("hm_zone_radius",
+                                             int(zone_cfg["radius_m"]))
+        heeft_midden = zone_cfg["lat"] is not None or voorstel is not None
+        with st.expander(
+                f"🔒 Privacyzone — aan ({zone_radius_nu} m)"
+                if zone_aan_nu and heeft_midden else "🔒 Privacyzone — uit",
+                expanded=False):
+            st.caption(
+                "Je tracks beginnen en eindigen bij de voordeur. Punten binnen "
+                "deze zone worden uit de heatmap weggelaten — vooral van belang "
+                "als je ooit een screenshot deelt. De routes lopen dan gewoon "
+                "door tot de rand van de zone. Het middelpunt wordt opgeslagen "
+                f"in `{heatmap_mod.privacy_path(config).relative_to(PROJECT_ROOT)}` "
+                "en niet in config.yaml: dat laatste staat in versiebeheer, en "
+                "het middelpunt *is* je huisadres."
+            )
+            z1, z2, z3 = st.columns(3)
+            zone_lat = z1.number_input(
+                "Breedtegraad", value=float(zone_cfg["lat"] if zone_cfg["lat"]
+                                            else (voorstel[0] if voorstel else 52.0)),
+                format="%.6f", step=0.0001, key="hm_zone_lat")
+            zone_lon = z2.number_input(
+                "Lengtegraad", value=float(zone_cfg["lon"] if zone_cfg["lon"]
+                                           else (voorstel[1] if voorstel else 5.0)),
+                format="%.6f", step=0.0001, key="hm_zone_lon")
+            zone_radius = z3.number_input(
+                "Straal (m)", min_value=0, max_value=5000,
+                value=int(zone_cfg["radius_m"]), step=50, key="hm_zone_radius")
+            zone_aan = st.toggle(
+                "Privacyzone toepassen", value=zone_cfg["enabled"],
+                key="hm_zone_aan",
+                help="Standaard aan; uitzetten mag voor persoonlijk gebruik.")
+            if zone_cfg["lat"] is None and voorstel:
+                st.info(
+                    f"Nog geen middelpunt opgeslagen — de zone gebruikt nu de "
+                    f"schatting uit de startpunten van al je tracks (mediaan): "
+                    f"{voorstel[0]:.6f}, {voorstel[1]:.6f}. Sla die op (of "
+                    "corrigeer hem) om hem vast te zetten."
+                )
+            elif voorstel:
+                st.caption(
+                    f"Schatting uit de startpunten van al je tracks (mediaan): "
+                    f"{voorstel[0]:.6f}, {voorstel[1]:.6f}"
+                )
+            if st.button("Privacyzone opslaan", key="hm_zone_opslaan"):
+                pad = heatmap_mod.store_privacy_settings(
+                    config, zone_aan, zone_lat, zone_lon, zone_radius)
+                st.toast(f"Privacyzone opgeslagen in "
+                         f"{pad.relative_to(PROJECT_ROOT)}.")
+                st.rerun()
+
+        # -- kaart -----------------------------------------------------------
+        start_datum, eind_datum = (periode if isinstance(periode, (tuple, list))
+                                   and len(periode) == 2 else (datum_min, datum_max))
+        zone = ((zone_lat, zone_lon, float(zone_radius)) if zone_aan
+                else (None, None, 0.0))
+        cellen = cache_heatmap_cells(
+            HM_VERSIE,
+            (tuple(gekozen_sporten), start_datum, eind_datum,
+             met_transport, met_verwijderd),
+            float(cel_m), schaal, zone)
+
+        if cellen.empty:
+            st.warning("Geen tracks binnen deze selectie.")
+        else:
+            view = heatmap_mod.fit_view(cellen)
+            laag = pdk.Layer(
+                "ScatterplotLayer",
+                data=cellen[["lat", "lon", "count", "sessies", "r", "g", "b", "a"]],
+                get_position="[lon, lat]",
+                get_fill_color="[r, g, b, a]",
+                # Radius in meters, dus de lijnen houden hun echte breedte bij
+                # inzoomen; de min/max in pixels houdt ze bij ver uitzoomen
+                # zichtbaar en bij ver inzoomen slank.
+                get_radius=float(cel_m) * 0.75,
+                radius_min_pixels=1,
+                radius_max_pixels=7,
+                stroked=False,
+                filled=True,
+                pickable=True,
+            )
+            st.pydeck_chart(pdk.Deck(
+                layers=[laag],
+                initial_view_state=pdk.ViewState(**view),
+                map_provider="carto",
+                map_style=pdk.map_styles.CARTO_DARK,
+                tooltip={"text": "{count}× langsgekomen in {sessies} sessies"},
+            ), height=640)
+
+            # Legenda: welke kleur hoort bij hoeveel passages.
+            stappen = heatmap_mod.legend_stops(cellen["count"], schaal)
+            blokjes = " ".join(
+                f"<span style='display:inline-block;width:2.1rem;height:0.85rem;"
+                f"background:{kleur};border-radius:2px;vertical-align:middle'></span>"
+                f"<span style='margin:0 0.9rem 0 0.35rem'>{aantal}×</span>"
+                for aantal, kleur in stappen)
+            st.markdown(
+                f"<div style='margin-top:0.4rem'>{blokjes}</div>",
+                unsafe_allow_html=True)
+
+            # Buiten het startbeeld gevallen cellen: die staan er wél, maar een
+            # losse rit in het buitenland mag de kaart niet naar landniveau
+            # uitzoomen. Zeggen dat ze bestaan is genoeg — uitzoomen doet de rest.
+            la0, la1, lo0, lo1 = heatmap_mod.view_bounds(cellen)
+            buiten = int((~(cellen["lat"].between(la0, la1)
+                            & cellen["lon"].between(lo0, lo1))).sum())
+            if buiten:
+                st.caption(
+                    f"De kaart opent op het gebied waar "
+                    f"{100 - 100 * buiten / len(cellen):.0f}% van je routes ligt. "
+                    f"{fmt_aantal(buiten)} rastercellen liggen daarbuiten (bijv. een rit of "
+                    "loopje elders) — zoom uit om ze te zien."
+                )
+
+            m1, m2, m3, m4 = st.columns(4)
+            n_sessies = (heatmap_mod.filter_points(
+                alle_punten, categories=tuple(gekozen_sporten),
+                start=start_datum, end=eind_datum,
+                include_transport=met_transport,
+                include_deleted=met_verwijderd)["activity_key"].nunique())
+            m1.metric("Sessies op de kaart", n_sessies)
+            m2.metric("Unieke km weg/pad",
+                      f"{heatmap_mod.covered_km(cellen, float(cel_m)):.0f}",
+                      help="Elke bezochte rastercel staat voor ongeveer één "
+                           "celbreedte route; dubbel gereden stukken tellen één "
+                           "keer. Een maat voor actieradius, geen kilometerstand.")
+            m3.metric("Vaakst gereden plek", f"{int(cellen['count'].max())}×")
+            m4.metric("Rastercellen", fmt_aantal(len(cellen)))
+
+            st.caption(
+                "Kaartachtergrond: © [OpenStreetMap](https://www.openstreetmap.org/copyright)"
+                "-contributors, © [CARTO](https://carto.com/attributions) "
+                "(Dark Matter). Tracks uit je eigen FIT-archief."
+            )
+
+    with st.expander("Hoe deze kaart gemaakt wordt", expanded=False):
+        st.markdown(
+            f"""
+- **Bron**: de originele FIT-bestanden in `uploads/`. FIT slaat posities op in
+  *semicircles*; die worden omgerekend met `graden = semicircles × 180 / 2³¹`.
+- **Herbemonstering op afstand** ({heatmap_mod.RESAMPLE_M:.0f} m): tussen de
+  gelogde punten wordt geïnterpoleerd, zodat er elke
+  {heatmap_mod.RESAMPLE_M:.0f} meter precies één punt ligt. Zonder deze stap
+  telt een heatmap *seconden* in plaats van *meters* en lichten stoplichten en
+  klimmetjes onterecht op. Sprongen groter dan
+  {heatmap_mod.MAX_GAP_M:.0f} m (pauze, autorit) worden niet overbrugd.
+- **Passages per cel**: opeenvolgende punten in dezelfde rastercel gelden als
+  één passage; een latere terugkomst telt opnieuw. Zo maakt de hoek waaronder
+  je een cel kruist niet uit.
+- **Cache**: `track_points` + `track_extract` in dezelfde SQLite-database.
+  Elk FIT-bestand wordt één keer geparst; bij het openen van deze tab worden
+  alleen nieuwe activiteiten bijgewerkt.
+
+Stand van de cache: **{hm_stats.get(heatmap_mod.STATUS_OK, 0)}** sessies met
+GPS ({fmt_aantal(hm_stats['punten'])} punten),
+**{hm_stats.get(heatmap_mod.STATUS_NO_GPS, 0)}** zonder GPS (banenzwemmen,
+indoor), **{hm_stats.get(heatmap_mod.STATUS_NO_FILE, 0)}** zonder gearchiveerd
+origineel, **{hm_stats.get(heatmap_mod.STATUS_ERROR, 0)}** onleesbaar.
+"""
+        )
+        if st.button("Trackcache opnieuw opbouwen", key="hm_herbouw",
+                     help="Wist de cache en parst alle FIT-bestanden opnieuw. "
+                          "Alleen nodig na een wijziging in de extractie."):
+            c = get_conn()
+            try:
+                c.execute("DELETE FROM track_points")
+                c.execute("DELETE FROM track_extract")
+                c.commit()
+            finally:
+                c.close()
+            cache_track_points.clear()
+            cache_heatmap_cells.clear()
+            st.rerun()
 
 # ----------------------------------------------------------------- logboek --
 with tab_log:
