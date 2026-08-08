@@ -29,7 +29,8 @@ athlete:
   - 0.89
   - 0.95
   - 1.0
-  training_days: Zwemmen ma/vr-ochtend, optioneel vr-avond, lange duurtraining zondag
+  training_days: Zwemmen ma/vr-ochtend, woon-werk wo/do, optioneel vr-avond, lange
+    duurtraining zondag
   session_time: 30-45 min doordeweeks, 1,5-2 uur op zondag
 races:
 - name: DTS Ouderkerk
@@ -38,14 +39,14 @@ races:
   bike_m: 40000
   run_m: 10000
   distances: 1,5km zwemmen / 40km fietsen / 10km lopen
-  goal: Goed finishen (eerste race)
+  goal: Goede generale voor Almere
   target_time: ''
-- name: IRONMAN 70.3 Luxembourg (Remich)
-  date: 2027-07-11
+- name: Challenge Almere
+  date: 2026-09-12
   swim_m: 1900
-  bike_m: 90000
+  bike_m: 94000
   run_m: 21100
-  distances: 1,9km zwemmen / 90km fietsen / 21,1km lopen
+  distances: 1,9km zwemmen / 94km fietsen / 21,1km lopen
   goal: Goed finishen (primaire doelrace)
   target_time: ''
 combo:
