@@ -3399,7 +3399,9 @@ with tab_heatmap:
                 f"<span style='margin:0 0.9rem 0 0.35rem'>{aantal}×</span>"
                 for aantal, kleur in stappen)
             st.markdown(
-                f"<div style='margin-top:0.4rem'>{blokjes}</div>",
+                "<div style='margin-top:0.4rem'>"
+                "<span style='opacity:0.7;margin-right:0.6rem'>Aantal keer "
+                f"langsgekomen:</span>{blokjes}</div>",
                 unsafe_allow_html=True)
 
             # Buiten het startbeeld gevallen cellen: die staan er wél, maar een
