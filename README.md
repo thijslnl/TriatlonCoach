@@ -64,17 +64,22 @@ kloppen (`llm.ollama.host` en `llm.ollama.model`, check met `ollama list`).
    **🌙 Herstel-tab** toont de trends (7-daags gemiddelde is de maat) en de
    kruising met je trainingsbelasting; de coach-feedback krijgt de recente
    herstelcontext mee als context, niet als oordeel.
-4. **Coach** — pas het weekschema aan en genereer een weekadvies
+4. **Voeding** — vul in wat je gaat doen (sport, afstand óf duur, intensiteit,
+   temperatuur, welke producten je bij je hebt) en krijg een concreet
+   voedingsplan terug: een tijdlijn met wat je wanneer neemt, een meeneemlijst
+   en waarschuwingen waar de constraints knellen. Zie
+   [de voedingsplanner](#de-voedingsplanner) hieronder.
+5. **Coach** — pas het weekschema aan en genereer een weekadvies
    (Anthropic API; het laatste advies blijft bewaard).
-5. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
+6. **Chat** — stel vragen over je data. Standaard antwoordt het lokale
    Ollama-model; zet de toggle aan om de cloud-coach te vragen.
-6. **Heatmap** — voor de lol: alle GPS-tracks die je ooit hebt gefietst,
+7. **Heatmap** — voor de lol: alle GPS-tracks die je ooit hebt gefietst,
    gelopen en open water gezwommen op één donkere kaart (CartoDB Dark Matter),
    feller waar je vaker langskwam. Filterbaar op sport en periode, met een
    **privacyzone** rond je huisadres die standaard aan staat. Zie
    [de heatmap](#de-heatmap) hieronder — met name waarom de dichtheid over
    afstand en niet over tijd wordt geteld.
-7. **Instellingen** — racedata (naam, datum), de **drempels per sport**
+8. **Instellingen** — racedata (naam, datum), de **drempels per sport**
    (loop-LTHR, FTP en fiets-LTHR), Ollama-host
    en -model, en de LLM-routing per taak. Onderaan staat het verbruik:
    aanroepen, tokens en geschatte Anthropic-kosten (geparset uit
@@ -85,6 +90,7 @@ Testen zonder dashboard kan ook:
 ```powershell
 .venv\Scripts\python tests\test_parse.py    # parse de zips in garmin_import/ (alleen lezen)
 .venv\Scripts\python tests\test_import.py   # importeer ze in SQLite + trainingslog
+.venv\Scripts\python tests\test_voeding.py  # voedingsplanner (op verzonnen data)
 ```
 
 ## Projectstructuur
@@ -108,6 +114,13 @@ tricoach/
   transport.py          transport-markering (ritje naar het zwembad ≠ training)
   heatmap.py            GPS-heatmap: extractie uit het FIT-archief, herbemonstering
                         op vaste afstand, dichtheid per rastercel, privacyzone
+  nutrition/            voedingsplanner (🥤 Voeding-tab), volledig deterministisch
+    rules.py            de richtlijnen als benoemde constanten + pure functies
+    products.py         de bewerkbare productdatabase (nutrition_products)
+    duration.py         duurschatting uit de eigen sessies, als bandbreedte
+    plan.py             de planner: tijdlijn, meeneemlijst, waarschuwingen
+    store.py            opgeslagen plannen + terugkoppeling (tolerantie)
+    explain.py          optionele toelichting van 2-3 zinnen (LLM, geen cijfers)
   trainingslog.py       markdown-entries in memory/trainingslog.md
   analysis.py           weekvolumes, zonetijden, tempo-bij-HR-trends
   schedule.py           aanpasbaar weekschema (memory/weekschema.md)
@@ -125,7 +138,9 @@ memory/                 het leesbare geheugen van de tool (markdown)
   beslissingen.md       architectuurkeuzes en waarom
 data/training.db        SQLite met de ruwe sessie- en seconde-data, de
                         wellness-dagen, de bewaarde coach-feedback per sessie
-                        (session_feedback) en de sync-status
+                        (session_feedback), de voedingsproducten en -plannen
+                        (nutrition_products, nutrition_plans,
+                        nutrition_feedback) en de sync-status
 data/garmin_tokens/     OAuth-tokens van de Garmin-login (buiten git)
 data/heatmap_privacy.json  middelpunt en straal van de privacyzone van de
                         heatmap — bewust hier en niet in config.yaml, want dat
@@ -140,6 +155,76 @@ tests/                  losse testscripts (python tests/test_<naam>.py, draaien
                         test_parse/test_import/test_uitbreiding lezen wél
                         garmin_import/ en verwachten de projectroot als werkmap)
 ```
+
+## De voedingsplanner
+
+Vooraf invoeren wat je gaat doen, terugkrijgen hoeveel koolhydraten je wanneer
+uit welk product haalt en wat er mee moet ([tricoach/nutrition/](tricoach/nutrition/),
+tab **🥤 Voeding**).
+
+> Dit is een startpunt op basis van algemene sportvoedingsrichtlijnen, bedoeld
+> om in training te testen — geen voedingsadvies. Bij twijfel of maagklachten:
+> raadpleeg een sportdiëtist. Diezelfde regel staat boven de tab.
+
+**Het algoritme rekent; het taalmodel legt hooguit uit.** Elk getal — duur,
+gram per uur, timing, aantallen — komt uit Python, en elke drempelwaarde is een
+benoemde constante in [rules.py](tricoach/nutrition/rules.py). Dezelfde invoer
+geeft altijd hetzelfde plan. Wil je er een toelichting van 2-3 zinnen bij, dan
+kan dat met één klik (taak `nutrition_note`, standaard het lokale Ollama-model)
+— maar dat model krijgt het al berekende plan en mag er geen cijfer aan
+toevoegen.
+
+**De duur komt uit je eigen sessies, niet uit een tabel.** Vergelijkbare
+sessies worden gezocht op het vermogensvenster (fietsen, %FTP) of het
+hartslagvenster (lopen), gecorrigeerd voor temperatuur en met Riegel naar de
+doelafstand geschaald. Je krijgt altijd een **bereik** ("3:05-3:25") met de
+onderbouwing eronder, en je kunt het overschrijven. Bij fietsen is de band het
+breedst: wind is daar de dominante onzekerheid en die zit niet in je historie.
+Hoeveel tempo warmte je kost, wordt uit je eigen sessies geschat; is daar te
+weinig data voor, dan valt het terug op 0,4% per graad boven 18 °C en zegt de
+app dat erbij.
+
+**Twee harde constraints, in deze volgorde.** Ze kunnen elkaar tegenspreken,
+dus de volgorde is een keuze:
+
+| # | Constraint | Wat de planner doet |
+|---|---|---|
+| A | **Single-source limiet.** Glucose/maltodextrine gaat via één darmtransporter en loopt vast op ~60 g/uur. | Bevat je selectie alleen single-source producten, dan wordt het advies afgetopt op 60 g/uur, mét de melding een dual-source product (glucose + fructose, ~1:0,8) toe te voegen. Daarmee kan het plan naar 90 g/uur, bij een getrainde darm tot 120. |
+| B | **Concentratielimiet.** Sportdrank is isotoon rond 6-8% koolhydraten; meer in dezelfde bidon maakt hem hypertoon en vertraagt juist de opname. | De planner vult eerst zoveel mogelijk uit drank (koolhydraten, vocht én natrium in één keer) maar niet verder dan 8% van het **totale** geplande vochtvolume; de rest verschuift automatisch naar gels. Is er geen gel geselecteerd, dan meldt het plan dat het doel niet gehaald wordt in plaats van de bidon stiekem te verzwaren. |
+
+Dat de check op het *totale* volume staat en niet per product is bewust: een
+geconcentreerd sachet (Beta Fuel, 80 g per 500 ml) is prima zodra je het met
+extra water aanvult — zo is het ook bedoeld.
+
+**Onbekende bron telt als single-source.** De Lidl HealthyFit noemt vier
+suikers maar geen verhouding. Zo'n product staat als `onbekend` in de database
+en wordt conservatief als single-source gerekend: een te laag plafond kost wat
+prestatie, een te hoog plafond kost je je race.
+
+**Vocht, natrium en cafeïne.** Vocht loopt van 400 ml/uur bij koud weer naar
+800 ml/uur vanaf 30 °C; natrium van 300 mg/l naar 600 mg/l rond 25 °C, en
+alleen bij hitte én langer dan drie uur tot ~1000 mg/l. De app rekent uit
+hoeveel natrium jouw producten leveren en meldt een tekort. Cafeïnegels worden
+bewust in de tweede helft gepland en nooit boven 3 mg per kg lichaamsgewicht
+(dat gewicht komt uit je laatste meting op de Lichaam-tab).
+
+**Timing.** Eerste inname na ~30 minuten — niet meteen bij de start — daarna
+elke 20-30 minuten, en bij een brick of triatlon zijn T1 en T2 vaste
+eetmomenten: dat zijn de rustigste momenten van de race. Tijdens het zwemmen
+kun je niets innemen, dus de behoefte wordt over de fiets, de loop en de
+wissels verdeeld.
+
+**Terugkoppeling is het waardevolste deel.** Sla een plan op bij een geplande
+sessie en vul achteraf in wat er werkelijk in ging en hoe je maag reageerde
+(goed / licht ongemak / klachten). Na een paar sessies staat er zwart op wit
+wat *jouw* darm aankan — "100 g/uur viel goed op 9 augustus" weegt zwaarder dan
+welke algemene richtlijn ook. De opgeslagen plannen bewaren de berekening als
+JSON, zodat een later gewijzigd product niet met terugwerkende kracht verandert
+wat er ooit gepland was.
+
+De onderbouwing van alle drempelwaarden staat in
+[memory/beslissingen.md](memory/beslissingen.md); de verificatiescenario's
+staan in `tests/test_voeding.py`.
 
 ## De heatmap
 

@@ -63,6 +63,20 @@ from tricoach.formatting import (
     stroke_label,
 )
 from tricoach.memory_review import MAX_LEEFTIJD_WEKEN, review_dataframe
+from tricoach.nutrition import products as voeding_producten
+from tricoach.nutrition import rules as voeding_regels
+from tricoach.nutrition import store as voeding_opslag
+from tricoach.nutrition.duration import LegRequest, estimate_duration
+from tricoach.nutrition.explain import explain_plan
+from tricoach.nutrition.plan import (
+    INTENSITY_LABEL,
+    SESSION_TYPES,
+    SEVERITY_WARNING,
+    AidStation,
+    PlanRequest,
+    build_plan,
+    legs_for,
+)
 from tricoach.progress import (
     acwr_status,
     best_efforts,
@@ -134,7 +148,7 @@ from tricoach.storage import (
     training_activities,
 )
 from tricoach.transport import is_transport, mark_transport, unmark_transport
-from tricoach.weather import wind_for_activity
+from tricoach.weather import forecast_temperature, wind_for_activity
 from tricoach.zones import bounds_from_lthr
 from tricoach.sportzones import (
     CYCLING,
@@ -671,6 +685,22 @@ def cache_heatmap_cells(hm_versie: tuple, filters: tuple, cell_m: float,
     return heatmap_mod.heatmap_cells(punten, cell_m=cell_m, method=schaal)
 
 
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def cache_verwachte_temperatuur(lat: float, lon: float, dag: date) -> float | None:
+    """De verwachte temperatuur voor een geplande sessie (Open-Meteo).
+
+    Gecachet met een TTL van zes uur: de voedingsplanner wil de verwachting
+    standaard invullen, maar een weerbericht verandert niet per klik en de app
+    hoort niet bij elke rerun een externe dienst te bevragen. Per dag en
+    locatie gaat er dus hooguit een paar keer per dag één request uit; falen
+    is zacht (None → zelf invullen).
+    """
+    try:
+        return forecast_temperature(lat, lon, dag, memory_dir=MEMORY_DIR)
+    except Exception:
+        return None
+
+
 def render_upload_feedback():
     """Toon de feedback van de zojuist geüploade sessies prominent bovenaan.
 
@@ -763,11 +793,11 @@ render_transport_suggesties()
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
- tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_coach, tab_chat,
- tab_heatmap, tab_log, tab_settings) = st.tabs(
+ tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_voeding, tab_coach,
+ tab_chat, tab_heatmap, tab_log, tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
-     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🧠 Coach", "💬 Chat",
-     "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
+     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🥤 Voeding", "🧠 Coach",
+     "💬 Chat", "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -3120,6 +3150,360 @@ with tab_herstel:
                 fig.update_xaxes(title_text="Week", row=3, col=1)
                 fig.update_layout(hovermode="x unified")
                 chart(fig, key="herstel_kruising")
+
+# ----------------------------------------------------------------- voeding --
+# Voedingsplanner: invoeren wat je gaat doen, terugkrijgen wat je wanneer neemt.
+# Het rekenwerk zit volledig in tricoach.nutrition (deterministisch, testbaar);
+# hier staat alleen de UI. Het taalmodel mag hooguit een korte toelichting
+# schrijven bij een al berekend plan — nooit de cijfers zelf.
+with tab_voeding:
+    st.subheader("🥤 Voedingsplan voor training of race")
+    st.caption(voeding_regels.DISCLAIMER)
+
+    laatste_gewicht = None
+    metingen = body.load_measurements(conn)
+    if not metingen.empty and metingen["weight_kg"].notna().any():
+        laatste_gewicht = float(metingen["weight_kg"].dropna().iloc[-1])
+
+    alle_producten = voeding_producten.load_products(conn)
+
+    plan_tab, product_tab, historie_tab = st.tabs(
+        ["📝 Plan maken", "📦 Producten", "📚 Opgeslagen plannen"])
+
+    # ------------------------------------------------------------ plan maken --
+    with plan_tab:
+        c1, c2, c3 = st.columns([2, 2, 2])
+        sessietype = c1.selectbox(
+            "Sport", list(SESSION_TYPES),
+            format_func=lambda k: SESSION_TYPES[k][0],
+            index=1, key="voeding_type",
+        )
+        intensiteit = c2.selectbox(
+            "Intensiteit", list(INTENSITY_LABEL),
+            format_func=lambda k: INTENSITY_LABEL[k], key="voeding_intensiteit",
+        )
+        plandatum = c3.date_input(
+            "Datum van de sessie", value=date.today(), key="voeding_datum",
+            help="Bepaalt welke weersverwachting wordt opgehaald.",
+        )
+
+        st.markdown("**Onderdelen** — vul per onderdeel een afstand óf een duur in.")
+        per_sport: dict[str, tuple[float | None, float | None]] = {}
+        posten: list[AidStation] = []
+        for i, sport in enumerate(legs_for(sessietype)):
+            k1, k2, k3 = st.columns([1, 2, 2])
+            k1.markdown(f"<div style='padding-top:2rem'>{sport_label(sport)}</div>",
+                        unsafe_allow_html=True)
+            basis = k2.radio(
+                "Invoer", ["Afstand", "Duur"], horizontal=True,
+                key=f"voeding_basis_{sport}", label_visibility="collapsed",
+            )
+            if basis == "Afstand":
+                eenheid = "m" if sport == "swimming" else "km"
+                standaard = {"swimming": 1900.0, "cycling": 90.0, "running": 21.1}[sport]
+                waarde = k3.number_input(
+                    f"Afstand ({eenheid})", min_value=0.0, value=standaard,
+                    step=1.0 if sport == "swimming" else 0.1,
+                    key=f"voeding_afstand_{sport}",
+                )
+                meters = waarde if sport == "swimming" else waarde * 1000
+                per_sport[sport] = (meters, None)
+            else:
+                minuten = k3.number_input(
+                    "Duur (minuten)", min_value=0.0, value=180.0, step=5.0,
+                    key=f"voeding_duur_{sport}",
+                )
+                per_sport[sport] = (None, minuten * 60)
+
+            if sport != "swimming":
+                ruw = st.text_input(
+                    f"Verzorgingsposten op de {sport_label(sport).lower()} "
+                    f"(km, komma-gescheiden)",
+                    key=f"voeding_posten_{sport}", placeholder="bijv. 30, 60",
+                    help="Waar je kunt bijvullen; dan hoeft niet alles mee.",
+                )
+                for stuk in ruw.replace(";", ",").split(","):
+                    try:
+                        posten.append(AidStation(leg_index=i, km=float(stuk.strip())))
+                    except ValueError:
+                        continue
+
+        # Temperatuur: standaard uit de verwachting van Open-Meteo voor de
+        # geplande dag (thuislocatie uit de privacyzone), handmatig aanpasbaar.
+        t1, t2 = st.columns([2, 3])
+        thuis = heatmap_mod.privacy_settings(config)
+        verwacht = (cache_verwachte_temperatuur(thuis["lat"], thuis["lon"], plandatum)
+                    if thuis.get("lat") and thuis.get("lon") else None)
+        temp = t1.number_input(
+            "Verwachte temperatuur (°C)",
+            value=float(verwacht if verwacht is not None
+                        else voeding_regels.DEFAULT_TEMP_C),
+            step=0.5, key=f"voeding_temp_{plandatum.isoformat()}",
+        )
+        t2.caption(
+            f"Verwachting Open-Meteo voor {plandatum:%d-%m-%Y}: **{verwacht:.1f} °C** "
+            f"— aanpasbaar." if verwacht is not None else
+            "Geen verwachting beschikbaar (te ver vooruit, geen thuislocatie of "
+            "geen internet) — vul de temperatuur zelf in."
+        )
+
+        st.markdown("**Beschikbare producten** — vink aan wat je bij je hebt.")
+        gekozen_namen = []
+        kolommen = st.columns(2)
+        for i, product in enumerate([p for p in alle_producten if p.active]):
+            label = (f"{product.name} — {product.carbs_g:.0f} g"
+                     + (" · dual-source" if product.effective_source ==
+                        voeding_producten.SOURCE_DUAL else " · single-source")
+                     + (f" · {product.caffeine_mg:.0f} mg cafeïne"
+                        if product.caffeine_mg else ""))
+            if kolommen[i % 2].checkbox(label, key=f"voeding_p_{product.name}"):
+                gekozen_namen.append(product.name)
+        selectie = [p for p in alle_producten if p.name in gekozen_namen]
+
+        with st.expander("Fijnafstelling (doel, gewicht, duur overschrijven)"):
+            f1, f2 = st.columns(2)
+            eigen_doel = f1.checkbox("Zelf een doel in g/uur kiezen",
+                                     key="voeding_eigen_doel")
+            doel_g_h = f1.number_input(
+                "Koolhydraten (g/uur)", min_value=0.0, max_value=150.0,
+                value=60.0, step=5.0, disabled=not eigen_doel,
+                key="voeding_doel_waarde",
+            )
+            getrainde_darm = f1.checkbox(
+                "Getrainde darm (tot 120 g/uur toestaan)",
+                key="voeding_darm",
+                help="Alleen aanzetten als hogere innames in training "
+                     "aantoonbaar goed vielen — zie de tolerantiegeschiedenis.",
+            )
+            gewicht = f2.number_input(
+                "Lichaamsgewicht (kg, voor het cafeïneplafond)",
+                min_value=0.0, value=float(laatste_gewicht or 0.0), step=0.5,
+                key="voeding_gewicht",
+                help="Standaard je laatste meting op de Lichaam-tab.",
+            )
+            eigen_duur = f2.checkbox("Duurschatting overschrijven",
+                                     key="voeding_eigen_duur")
+            duur_min = f2.number_input(
+                "Totale duur (minuten)", min_value=0.0, value=180.0, step=5.0,
+                disabled=not eigen_duur, key="voeding_duur_waarde",
+            )
+
+        if st.button("🧮 Bereken plan", type="primary", key="voeding_bereken"):
+            legs = [LegRequest(sport=s, distance_m=per_sport[s][0],
+                               duration_s=per_sport[s][1])
+                    for s in legs_for(sessietype)]
+            with st.spinner("Duur schatten uit je eigen sessies..."):
+                schatting = estimate_duration(
+                    conn, trainingen, config["athlete"], legs, intensiteit, temp)
+            verzoek = PlanRequest(
+                session_type=sessietype, legs=legs, intensity=intensiteit,
+                temp_c=temp, product_names=gekozen_namen, aid_stations=posten,
+                weight_kg=gewicht or None,
+                target_g_h=doel_g_h if eigen_doel else None,
+                trained_gut=getrainde_darm,
+                override_duration_s=duur_min * 60 if eigen_duur else None,
+                planned_date=plandatum,
+                name=f"{SESSION_TYPES[sessietype][0]} {plandatum:%d-%m-%Y}",
+            )
+            st.session_state["voeding_plan"] = build_plan(verzoek, selectie, schatting)
+            st.session_state.pop("voeding_toelichting", None)
+
+        plan = st.session_state.get("voeding_plan")
+        if plan is None:
+            st.info("Vul hierboven je sessie in en klik op **Bereken plan**.")
+        else:
+            st.divider()
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Geschatte duur", plan.duration.range_text(),
+                      help="Uit je eigen sessies; zie de onderbouwing hieronder.")
+            m2.metric("Koolhydraten", f"{plan.totals['carbs_g']:.0f} g",
+                      f"{plan.totals['carbs_per_hour']:.0f} g/uur")
+            m3.metric("Vocht", f"{plan.totals['fluid_ml']:.0f} ml",
+                      f"{plan.totals['fluid_ml_per_hour']:.0f} ml/uur")
+            m4.metric("Natrium", f"{plan.totals['sodium_mg']:.0f} mg",
+                      f"{plan.totals['caffeine_mg']:.0f} mg cafeïne"
+                      if plan.totals["caffeine_mg"] else None)
+
+            # Het plafond hangt aan de productselectie; zonder selectie is er
+            # niets om een plafond van af te leiden en zou het getal suggereren
+            # dat er al iets gekozen is.
+            plafond = (f" · opnameplafond van je selectie: "
+                       f"**{plan.cap_g_h:.0f} g/uur**"
+                       if plan.request.product_names else
+                       " · nog geen producten aangevinkt")
+            st.caption(
+                f"Richtlijn: **{plan.target.as_text()}** · plan: "
+                f"**{plan.planned_g_h:.0f} g/uur** over de eetbare tijd "
+                f"({fmt_duration(plan.feedable_s)}){plafond}."
+            )
+            for been in plan.duration.legs:
+                st.caption(f"↳ {been.label}: **{been.range_text()}** — {been.basis}")
+
+            for melding in plan.warnings:
+                (st.warning if melding.severity == SEVERITY_WARNING else st.info)(
+                    melding.text)
+
+            if plan.events:
+                st.markdown("#### ⏱️ Tijdlijn")
+                tijdlijn = pd.DataFrame([{
+                    "Moment": e.time_label,
+                    "Onderdeel": e.segment,
+                    "Km": f"{e.km:.1f}" if e.km is not None else GEEN_WAARDE,
+                    "Wat": f"{e.amount} {e.product}",
+                    "Koolhydraten": f"{e.carbs_g:.0f} g",
+                    "Totaal tot hier": f"{e.cumulative_carbs_g:.0f} g",
+                    "Opmerking": e.note,
+                } for e in plan.events])
+                st.dataframe(tijdlijn, hide_index=True, width="stretch")
+            if plan.drink.carbs_g or plan.drink.fluid_ml:
+                st.caption(
+                    f"Drinken loopt continu door: ~"
+                    f"{plan.drink.ml_per_hour / 4:.0f} ml elke 15 minuten "
+                    f"({plan.drink.ml_per_hour:.0f} ml/uur). Het lopende totaal "
+                    f"hierboven telt de drank naar rato mee."
+                )
+
+            if plan.carry:
+                st.markdown("#### 🎒 Meenemen")
+                st.dataframe(pd.DataFrame([{
+                    "Wat": c.label, "Hoeveel": c.amount, "Toelichting": c.detail,
+                } for c in plan.carry]), hide_index=True, width="stretch")
+
+            st.markdown("#### 💾 Bewaren bij een geplande sessie")
+            b1, b2 = st.columns([3, 1])
+            plannaam = b1.text_input("Naam", value=plan.request.name,
+                                     key="voeding_plannaam")
+            if b2.button("💾 Plan opslaan", key="voeding_opslaan"):
+                voeding_opslag.save_plan(conn, plan, plannaam, plandatum)
+                st.success(f"Plan '{plannaam}' opgeslagen — vul na afloop op de "
+                           f"tab **Opgeslagen plannen** in hoe het viel.")
+
+            st.caption(
+                "De toelichting is het enige wat een taalmodel hier schrijft; "
+                "alle cijfers hierboven zijn door het algoritme berekend."
+            )
+            if st.button("💬 Korte toelichting vragen", key="voeding_toelicht"):
+                try:
+                    with st.spinner("Toelichting schrijven..."):
+                        st.session_state["voeding_toelichting"] = explain_plan(
+                            router, plan)
+                except Exception as e:
+                    st.error(f"Toelichting mislukt: {e}")
+            if toelichting := st.session_state.get("voeding_toelichting"):
+                st.info(toelichting)
+
+    # -------------------------------------------------------------- producten --
+    with product_tab:
+        st.caption(
+            "Waarden per eenheid (één gel, één schepje/sachet, één portie), van "
+            "de verpakking — controleer ze bij een nieuwe batch, recepturen "
+            "veranderen. **Bron** bepaalt het opnameplafond: `single` = "
+            "glucose/maltodextrine (~60 g/uur), `dual` = glucose + fructose "
+            "(~90 g/uur), `onbekend` = meerdere suikers zonder ratio en telt "
+            "conservatief als single."
+        )
+        bewerkt = st.data_editor(
+            voeding_producten.products_dataframe(alle_producten),
+            num_rows="dynamic", hide_index=True, width="stretch",
+            key="voeding_producteditor",
+            column_config={
+                "name": st.column_config.TextColumn("Product", required=True),
+                "kind": st.column_config.SelectboxColumn(
+                    "Type", options=list(voeding_producten.KINDS)),
+                "carbs_g": st.column_config.NumberColumn(
+                    "Koolhydraten (g)", min_value=0.0, step=1.0),
+                "source": st.column_config.SelectboxColumn(
+                    "Bron", options=list(voeding_producten.SOURCES)),
+                "ratio": st.column_config.TextColumn("Ratio / samenstelling"),
+                "sodium_mg": st.column_config.NumberColumn(
+                    "Natrium (mg)", min_value=0.0, step=1.0),
+                "caffeine_mg": st.column_config.NumberColumn(
+                    "Cafeïne (mg)", min_value=0.0, step=5.0),
+                "serving_ml": st.column_config.NumberColumn("Volume (ml)"),
+                "serving_g": st.column_config.NumberColumn("Portie (g)"),
+                "note": st.column_config.TextColumn("Opmerking"),
+                "active": st.column_config.CheckboxColumn("In voorraad"),
+            },
+        )
+        p1, p2 = st.columns([1, 4])
+        if p1.button("💾 Producten opslaan", key="voeding_prod_opslaan"):
+            n = voeding_producten.save_products(
+                conn, voeding_producten.products_from_dataframe(bewerkt))
+            st.success(f"{n} producten opgeslagen.")
+            st.rerun()
+        if p2.button("↩️ Terug naar de standaardlijst", key="voeding_prod_reset"):
+            voeding_producten.reset_products(conn)
+            st.rerun()
+
+    # ------------------------------------------------------ opgeslagen plannen --
+    with historie_tab:
+        tolerantie = voeding_opslag.tolerance_summary(conn)
+        if tolerantie:
+            st.markdown("#### 🧪 Wat mijn maag aankan")
+            for regel in tolerantie:
+                st.markdown(f"- {regel}")
+            st.caption(
+                "Dit zijn je eigen cijfers en die wegen zwaarder dan een "
+                "algemene richtlijn — ze gaan over jouw darm."
+            )
+            geschiedenis = voeding_opslag.tolerance_history(conn)
+            if len(geschiedenis) >= 2 and geschiedenis["g_per_uur"].notna().any():
+                fig = px.scatter(
+                    geschiedenis.dropna(subset=["g_per_uur"]),
+                    x="datum", y="g_per_uur", color="gut",
+                    labels={"datum": "", "g_per_uur": "g/uur", "gut": "Maag"},
+                    # Groen/oranje/rood uit de zonereeks: goed → klachten.
+                    color_discrete_map={
+                        voeding_opslag.GUT_GOOD: PAL["zones"][1],
+                        voeding_opslag.GUT_MILD: PAL["zones"][2],
+                        voeding_opslag.GUT_BAD: PAL["zones"][4],
+                    },
+                )
+                chart(style_fig(fig), key="voeding_tolerantie")
+            st.divider()
+
+        plannen = voeding_opslag.load_plans(conn)
+        if plannen.empty:
+            st.info("Nog geen plannen opgeslagen.")
+        else:
+            for _, rij in plannen.iterrows():
+                ingevuld = pd.notna(rij["gut"])
+                kop = (f"{'✅' if ingevuld else '📝'} {rij['name']}"
+                       + (f" — {rij['planned_date']}" if rij["planned_date"] else ""))
+                with st.expander(kop, expanded=not ingevuld):
+                    st.code(rij["summary"] or "", language=None)
+                    if ingevuld:
+                        st.markdown(
+                            f"**Achteraf:** {voeding_opslag.GUT_ICON.get(rij['gut'], '')} "
+                            f"{rij['gut']} — {rij['actual_carbs_g']:.0f} g in "
+                            f"{fmt_duration(rij['actual_duration_s'])}"
+                            + (f" · _{rij['note']}_" if rij["note"] else "")
+                        )
+                    with st.form(f"voeding_fb_{rij['plan_id']}"):
+                        st.markdown("**Hoe ging het?**")
+                        v1, v2, v3 = st.columns(3)
+                        werkelijk = v1.number_input(
+                            "Werkelijk ingenomen (g koolhydraten)", min_value=0.0,
+                            value=float(rij["actual_carbs_g"] or 0), step=5.0)
+                        werkelijke_duur = v2.number_input(
+                            "Werkelijke duur (minuten)", min_value=0.0,
+                            value=float((rij["actual_duration_s"] or 0) / 60),
+                            step=5.0)
+                        maag = v3.selectbox(
+                            "Maag", list(voeding_opslag.GUT_OPTIONS),
+                            index=(list(voeding_opslag.GUT_OPTIONS).index(rij["gut"])
+                                   if ingevuld else 0))
+                        notitie = st.text_input("Notitie", value=rij["note"] or "")
+                        opslaan, verwijderen = st.columns([1, 1])
+                        if opslaan.form_submit_button("💾 Opslaan"):
+                            voeding_opslag.save_feedback(
+                                conn, int(rij["plan_id"]), werkelijk,
+                                werkelijke_duur * 60, maag, notitie)
+                            st.rerun()
+                        if verwijderen.form_submit_button("🗑️ Plan verwijderen"):
+                            voeding_opslag.delete_plan(conn, int(rij["plan_id"]))
+                            st.rerun()
+
 
 # ------------------------------------------------------------------- coach --
 with tab_coach:

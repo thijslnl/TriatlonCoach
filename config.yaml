@@ -85,6 +85,7 @@ llm:
     trends: anthropic
     feedback: anthropic
     body_trend: ollama
+    nutrition_note: ollama
 garmin:
   auto_sync: true
   auto_sync_hours: 6

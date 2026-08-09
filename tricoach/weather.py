@@ -23,7 +23,7 @@ keer aanroepen en nooit bij een gewone page-load.
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +36,14 @@ from tricoach.fit_parser import ParsedActivity
 # als tegenwind.
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 HOURLY_VARS = "wind_speed_10m,wind_direction_10m,wind_gusts_10m,temperature_2m"
+
+# Verwachting vooruit (voor de voedingsplanner: welke temperatuur staat er op
+# de dag van de geplande sessie?). Zelfde dienst, ander endpoint; het archief
+# gaat alleen over gisteren en eerder.
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+# Zover vooruit geeft Open-Meteo een uurverwachting; daarbuiten heeft vragen
+# geen zin en vult de atleet de temperatuur zelf in.
+FORECAST_MAX_DAYS = 16
 # Lokale tijdzone als string; pandas regelt de conversie (zoals elders in de
 # app), zodat we niet van de losse ``tzdata``-package afhangen.
 TIMEZONE = "Europe/Amsterdam"
@@ -259,6 +267,61 @@ def wind_for_activity(act: ParsedActivity, memory_dir: Path | None = None) -> Wi
     return wind
 
 
+# ------------------------------------------------------------ verwachting --
+
+def forecast_temperature(lat: float, lon: float, day: date, hour: int = 10,
+                         memory_dir: Path | None = None) -> float | None:
+    """De verwachte temperatuur (°C) op een dag en uur, voor een geplande sessie.
+
+    Gebruikt het gratis forecast-endpoint van dezelfde dienst. Geeft ``None``
+    als de dag verder dan :data:`FORECAST_MAX_DAYS` weg ligt, als de API niet
+    bereikbaar is of als er voor dat uur geen waarde is — de planner valt dan
+    terug op een handmatig ingevulde temperatuur. Faalt dus net zo zacht als
+    :func:`wind_for_activity`: geen internet is geen kapot plan.
+
+    Er gaat alleen een coördinaat en een dag naartoe, net als bij de winddata.
+    """
+    vandaag = pd.Timestamp.now(tz=TIMEZONE).date()
+    dagen_vooruit = (day - vandaag).days
+    if dagen_vooruit < 0 or dagen_vooruit > FORECAST_MAX_DAYS:
+        return None
+
+    params = {
+        "latitude": round(lat, 4),
+        "longitude": round(lon, 4),
+        "start_date": day.isoformat(),
+        "end_date": day.isoformat(),
+        "hourly": "temperature_2m",
+        "timezone": TIMEZONE,
+    }
+    try:
+        resp = requests.get(FORECAST_URL, params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError):
+        if memory_dir:
+            _log_forecast(memory_dir, lat, lon, day, hour,
+                          "netwerk-/API-fout (overgeslagen)")
+        return None
+
+    hourly = payload.get("hourly") or {}
+    tijden, temps = hourly.get("time") or [], hourly.get("temperature_2m") or []
+    if not tijden or not temps:
+        if memory_dir:
+            _log_forecast(memory_dir, lat, lon, day, hour, "geen verwachting voor deze dag")
+        return None
+    uren = [int(t[11:13]) for t in tijden]
+    idx = min(range(len(uren)), key=lambda i: abs(uren[i] - hour))
+    waarde = temps[idx] if idx < len(temps) else None
+    if waarde is None:
+        if memory_dir:
+            _log_forecast(memory_dir, lat, lon, day, hour, "geen waarde voor dit uur")
+        return None
+    if memory_dir:
+        _log_forecast(memory_dir, lat, lon, day, hour, f"{float(waarde):.1f} °C")
+    return float(waarde)
+
+
 # ------------------------------------------------------------------- logging --
 
 HEADER = """# Externe data-log (Open-Meteo)
@@ -287,6 +350,29 @@ def _log_call(
         f"sleutel `{act.activity_key}`\n"
         f"- **Locatie/uur:** lat {coord[0]:.4f}, lon {coord[1]:.4f}, uur {local.hour}:00\n"
         f"- **Aanroep:** {url or ARCHIVE_URL}\n"
+        f"- **Resultaat:** {result}\n"
+    )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+
+def _log_forecast(memory_dir: Path, lat: float, lon: float, day: date,
+                  hour: int, result: str) -> None:
+    """Leg één temperatuurverwachting vast in memory/externe_data_log.md.
+
+    Dezelfde log als de windaanroepen: elke externe datavraag blijft
+    navolgbaar, ook die van de voedingsplanner.
+    """
+    path = memory_dir / "externe_data_log.md"
+    if not path.exists():
+        path.write_text(HEADER, encoding="utf-8")
+    entry = (
+        f"\n## {datetime.now():%Y-%m-%d %H:%M:%S} — Open-Meteo temperatuurverwachting\n\n"
+        f"- **Aanleiding:** voedingsplan voor een geplande sessie\n"
+        f"- **Locatie/uur:** lat {lat:.4f}, lon {lon:.4f}, {day.isoformat()} "
+        f"uur {hour}:00\n"
+        f"- **Aanroep:** {FORECAST_URL}?latitude={lat:.4f}&longitude={lon:.4f}"
+        f"&start_date={day.isoformat()}&hourly=temperature_2m\n"
         f"- **Resultaat:** {result}\n"
     )
     with open(path, "a", encoding="utf-8") as f:
