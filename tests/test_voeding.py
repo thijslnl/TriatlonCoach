@@ -191,6 +191,15 @@ def test_plafonds_en_vocht():
     check("cafeïneplafond 3 mg/kg",
           rules.caffeine_cap_mg(104.0) == 312.0)
 
+    check("eigen verhouding wint van de isotone grens (Beta Fuel: 80/500 = 16%)",
+          rules.concentration_cap_pct(80.0, 500.0) == 16.0)
+    check("zonder eigen opgave valt terug op de isotone bovengrens",
+          rules.concentration_cap_pct(None, None) == rules.ISOTONIC_PCT_HI
+          and rules.concentration_cap_pct(30.0, None) == rules.ISOTONIC_PCT_HI)
+    check("16% van 500 ml met eigen verhouding = 80 g",
+          rules.max_carbs_from_fluid_g(500, rules.concentration_cap_pct(80.0, 500.0))
+          == 80.0)
+
 
 def test_conservatieve_bron():
     print("\n== Onbekende koolhydraatbron telt als single-source ==")
@@ -239,6 +248,48 @@ def test_cafeine_in_tweede_helft():
     check("binnen het cafeïneplafond",
           plan.totals["caffeine_mg"] <= plafond,
           f"{plan.totals['caffeine_mg']:.0f} van max {plafond:.0f} mg")
+
+
+def test_cafeine_niet_onterecht_afgewezen():
+    print("\n== Cafeïnegel wordt ingepland zolang het cumulatieve totaal onder het plafond blijft ==")
+    # Klein doel over een lange sessie: er is maar 1 eenheid brandstof nodig,
+    # en die zou zonder fix bij het eerst-beschikbare moment (ruim vóór de
+    # helft) belanden — waarna de cafeïnegel volledig werd geschrapt met een
+    # melding die (onterecht) het plafond de schuld gaf, ook al zit 75 mg ruim
+    # onder een plafond van 312 mg.
+    schatting = vaste_duur("cycling", 3 * 3600)
+    verzoek = PlanRequest(
+        session_type="cycling", intensity="rustig", temp_c=20.0,
+        weight_kg=GEWICHT_KG, override_duration_s=3 * 3600, target_g_h=10.0)
+    plan = build_plan(verzoek, producten(
+        "SIS Beta Fuel gel", "SIS Go Isotonic gel + cafeïne"), schatting)
+    caf = [e for e in plan.events if e.caffeine_mg > 0]
+    check("cafeïnegel toch ingepland (75 mg past ruim onder 312 mg)",
+          bool(caf), f"{len(caf)} stuks, plafond {rules.caffeine_cap_mg(GEWICHT_KG):.0f} mg")
+    check("niet ten onrechte afgewezen op het plafond",
+          "cafeine_past_niet" not in codes(plan), codes(plan))
+    check("nog altijd pas na de helft",
+          all(e.t_s >= plan.total_s / 2 for e in caf),
+          "; ".join(e.time_label for e in caf))
+
+
+def test_bidongrootte():
+    print("\n== Bidongrootte is instelbaar ==")
+    schatting = vaste_duur("cycling", 3 * 3600, 90000)
+    basis = dict(session_type="cycling", intensity="rustig", temp_c=25.0,
+                 weight_kg=GEWICHT_KG, override_duration_s=3 * 3600,
+                 target_g_h=60.0)
+    selectie = producten("SIS Beta Fuel drank (sachet)")
+    standaard = build_plan(PlanRequest(**basis), selectie, schatting)
+    check("standaard bidon is 750 ml", standaard.request.bottle_ml == 750.0)
+
+    klein = build_plan(PlanRequest(bottle_ml=500.0, **basis), selectie, schatting)
+    bidons_standaard = next(
+        c for c in standaard.carry if c.label == "Bidons").amount
+    bidons_klein = next(c for c in klein.carry if c.label == "Bidons").amount
+    check("kleinere bidon vraagt om meer bidons",
+          "500" in bidons_klein and "750" in bidons_standaard,
+          f"{bidons_standaard} vs {bidons_klein}")
 
 
 def test_natriumtekort():
@@ -434,9 +485,19 @@ def verificatie_3_middenafstand():
           plan.totals["carbs_per_feedable_hour"] <= rules.DUAL_SOURCE_CAP_G_H + 1,
           f"{plan.totals['carbs_per_feedable_hour']:.0f} g/uur over de eetbare tijd")
 
+    # Beta Fuel is met zijn eigen 16%-verhouding (i.p.v. de isotone 6-8%)
+    # geconcentreerd genoeg om dit hele plan uit de drank te dekken; er blijft
+    # dan niets over om als vaste voeding naar de wissels te schuiven. Alleen
+    # als er wél nog vaste voeding gepland is, moet die de wissels benutten —
+    # dat zijn de rustigste eetmomenten van de race.
     wissels = [e for e in plan.events if "wissel" in e.note]
-    check("T1 en T2 als expliciete eetmomenten", len(wissels) >= 2,
-          ", ".join(f"{e.time_label} {e.segment}" for e in wissels))
+    if plan.events:
+        check("T1 en T2 als expliciete eetmomenten", len(wissels) >= 2,
+              ", ".join(f"{e.time_label} {e.segment}" for e in wissels))
+    else:
+        check("drank dekt de volledige behoefte (Beta Fuel: 16%, geen vaste "
+              "voeding nodig)", plan.drink.carbs_g >= totaal - 1e-6,
+              f"drank {plan.drink.carbs_g:.0f} g van {totaal:.0f} g totaal")
     check("niets ingepland tijdens het zwemmen",
           not any(e.segment == "Zwemmen" for e in plan.events))
     check("melding dat zwemmen niet eetbaar is",
@@ -480,7 +541,8 @@ def main() -> int:
     print("Voedingsplanner — tests")
     for test in (test_koolhydraatbanden, test_plafonds_en_vocht,
                  test_conservatieve_bron, test_timing,
-                 test_cafeine_in_tweede_helft, test_natriumtekort,
+                 test_cafeine_in_tweede_helft, test_cafeine_niet_onterecht_afgewezen,
+                 test_bidongrootte, test_natriumtekort,
                  test_verzorgingsposten, test_duurschatting_uit_eigen_data,
                  test_opslag_en_terugkoppeling, test_productdatabase,
                  verificatie_1_negentig_km_fietsen, verificatie_2_uur_rustig_lopen,

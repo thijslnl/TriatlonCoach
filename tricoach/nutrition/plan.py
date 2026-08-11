@@ -82,6 +82,7 @@ class PlanRequest:
     weight_kg: float | None = None
     target_g_h: float | None = None
     trained_gut: bool = False
+    bottle_ml: float = rules.BOTTLE_ML
     override_duration_s: float | None = None
     planned_date: date | None = None
     name: str = ""
@@ -475,7 +476,7 @@ def _apply_absorption_cap(plan: NutritionPlan, selection: list[Product]) -> None
 # --------------------------------------------- stap 4: vocht en drankvulling --
 
 def _plan_fluid_and_drink(plan: NutritionPlan, selection: list[Product]) -> None:
-    """Constraint B: vul zoveel mogelijk uit drank, binnen de isotone grens."""
+    """Constraint B: vul zoveel mogelijk uit drank, binnen de concentratiegrens."""
     uren = plan.feedable_s / 3600
     ml_per_uur = rules.fluid_ml_per_hour(plan.request.temp_c)
     totaal_vocht = ml_per_uur * uren
@@ -487,7 +488,12 @@ def _plan_fluid_and_drink(plan: NutritionPlan, selection: list[Product]) -> None
     if drank is None or nodig <= 0:
         return
 
-    maximaal_uit_vocht = rules.max_carbs_from_fluid_g(totaal_vocht)
+    # Een drank met een eigen fabrikantopgave (koolhydraten per aanbevolen
+    # mengvolume) gebruikt die eigen, eventueel hypertone, verhouding; alleen
+    # zonder die opgave geldt de algemene isotone grens.
+    max_pct = rules.concentration_cap_pct(drank.carbs_g, drank.serving_ml)
+    eigen_opgave = bool(drank.carbs_g and drank.serving_ml)
+    maximaal_uit_vocht = rules.max_carbs_from_fluid_g(totaal_vocht, max_pct)
     gewenst = min(nodig, maximaal_uit_vocht)
     porties = math.floor(gewenst / drank.carbs_g) if drank.carbs_g else 0
     if porties == 0 and drank.carbs_g <= maximaal_uit_vocht and nodig > 0:
@@ -504,12 +510,15 @@ def _plan_fluid_and_drink(plan: NutritionPlan, selection: list[Product]) -> None
         tekort = nodig - plan.drink.carbs_g
         heeft_gel = any(p.kind != KIND_DRINK and p.carbs_g > 0 for p in selection)
         concentratie = rules.concentration_pct(nodig, totaal_vocht) or 0
+        grens_tekst = (f"de aanbevolen verhouding van {drank.name} ({max_pct:.0f}%)"
+                        if eigen_opgave else
+                        f"de isotone {rules.ISOTONIC_PCT_LO:.0f}-"
+                        f"{rules.ISOTONIC_PCT_HI:.0f}%")
         basis = (
             f"{nodig:.0f} g koolhydraten past niet in de geplande {totaal_vocht:.0f} ml "
-            f"vocht: dat zou {concentratie:.1f}% worden, boven de isotone "
-            f"{rules.ISOTONIC_PCT_LO:.0f}-{rules.ISOTONIC_PCT_HI:.0f}%. Hypertone drank "
-            f"verlaat de maag trager, dus meer poeder in dezelfde bidon levert "
-            f"juist mínder opname."
+            f"vocht: dat zou {concentratie:.1f}% worden, boven {grens_tekst}. Te "
+            f"geconcentreerde drank verlaat de maag trager, dus meer poeder in "
+            f"dezelfde bidon levert juist mínder opname."
         )
         if heeft_gel:
             plan.warnings.append(PlanWarning(
@@ -590,7 +599,12 @@ def _plan_solids(plan: NutritionPlan, selection: list[Product]) -> None:
     caf_gepland = 0.0
     tweede_helft_vanaf = plan.total_s * rules.CAFFEINE_FROM_FRACTION
 
-    # Cafeïne van achter naar voren toewijzen: zo laat mogelijk, binnen het plafond.
+    # Cafeïne toewijzen: zo laat mogelijk, zolang het cumulatieve totaal onder
+    # het plafond blijft. Gekozen uit het volledige rooster van momenten
+    # (``slots``), niet alleen uit de momenten die de koolhydraatplanning
+    # toevallig al koos — anders sneuvelt een gel onterecht zodra er maar één
+    # moment nodig is en dat toevallig in de eerste helft valt, ook al past
+    # de cafeïne zelf ruim binnen het plafond.
     caf_momenten: dict[float, int] = {}
     if cafeine is not None and cafeine.caffeine_mg > 0:
         if plafond is None:
@@ -600,21 +614,37 @@ def _plan_solids(plan: NutritionPlan, selection: list[Product]) -> None:
                 "worden berekend; cafeïnegels zijn daarom niet ingepland.",
                 SEVERITY_INFO))
         else:
-            for moment, aantal in sorted(zip(momenten, per_moment), reverse=True):
-                if moment < tweede_helft_vanaf:
-                    break
-                for _ in range(aantal):
-                    if caf_gepland + cafeine.caffeine_mg > plafond:
-                        break
-                    caf_momenten[moment] = caf_momenten.get(moment, 0) + 1
-                    caf_gepland += cafeine.caffeine_mg
+            max_caf_eenheden = int(plafond // cafeine.caffeine_mg)
+            tweede_helft_slots = sorted(
+                (s for s in slots if s >= tweede_helft_vanaf), reverse=True)
+            te_plannen = min(max_caf_eenheden, len(tweede_helft_slots), eenheden)
+            for moment in tweede_helft_slots[:te_plannen]:
+                if moment not in momenten:
+                    # Geen bestaand innamemoment op deze tijd: verplaats het
+                    # dichtstbijzijnde moment uit de eerste helft hierheen, zodat
+                    # het totaal aantal eenheden (en dus de koolhydraten) gelijk
+                    # blijft.
+                    eerste_helft = [m for m in momenten if m < tweede_helft_vanaf]
+                    if not eerste_helft:
+                        continue
+                    te_verplaatsen = min(eerste_helft, key=lambda m: abs(m - moment))
+                    momenten[momenten.index(te_verplaatsen)] = moment
+                caf_momenten[moment] = caf_momenten.get(moment, 0) + 1
+                caf_gepland += cafeine.caffeine_mg
             if caf_gepland == 0:
-                plan.warnings.append(PlanWarning(
-                    "cafeine_past_niet",
-                    f"Eén {cafeine.name} levert {cafeine.caffeine_mg:.0f} mg cafeïne "
-                    f"en dat past niet binnen je plafond van {plafond:.0f} mg "
-                    f"({rules.CAFFEINE_MAX_MG_PER_KG:.0f} mg/kg). Niet ingepland.",
-                    SEVERITY_INFO))
+                if not tweede_helft_slots:
+                    plan.warnings.append(PlanWarning(
+                        "cafeine_geen_moment",
+                        "Er is geen innamemoment in de tweede helft van de sessie; "
+                        "cafeïne is daarom niet ingepland.",
+                        SEVERITY_INFO))
+                else:
+                    plan.warnings.append(PlanWarning(
+                        "cafeine_past_niet",
+                        f"Eén {cafeine.name} levert {cafeine.caffeine_mg:.0f} mg cafeïne "
+                        f"en dat past niet binnen je plafond van {plafond:.0f} mg "
+                        f"({rules.CAFFEINE_MAX_MG_PER_KG:.0f} mg/kg). Niet ingepland.",
+                        SEVERITY_INFO))
 
     for moment, aantal in zip(momenten, per_moment):
         n_caf = caf_momenten.get(moment, 0)
@@ -686,19 +716,24 @@ def _build_carry_list(plan: NutritionPlan, selection: list[Product]) -> None:
     if plan.drink.fluid_ml <= 0:
         return
 
-    bidons = max(1, math.ceil(plan.drink.fluid_ml / rules.BOTTLE_ML))
+    bottle_ml = plan.request.bottle_ml or rules.BOTTLE_ML
+    bidons = max(1, math.ceil(plan.drink.fluid_ml / bottle_ml))
     per_bidon_g = plan.drink.carbs_g / bidons if bidons else 0
     per_bidon_ml = plan.drink.fluid_ml / bidons
     concentratie = rules.concentration_pct(per_bidon_g, per_bidon_ml)
 
     if plan.drink.product is not None and plan.drink.servings > 0:
+        eigen_opgave = bool(plan.drink.product.carbs_g and plan.drink.product.serving_ml)
+        grens_tekst = (f"aanbevolen verhouding is "
+                        f"{rules.concentration_cap_pct(plan.drink.product.carbs_g, plan.drink.product.serving_ml):.0f}%"
+                        if eigen_opgave else
+                        f"isotoon is {rules.ISOTONIC_PCT_LO:.0f}-{rules.ISOTONIC_PCT_HI:.0f}%")
         plan.carry.append(CarryItem(
             label=plan.drink.product.name,
             amount=f"{plan.drink.servings:.0f}× {plan.drink.product.unit_label}",
             detail=(f"totaal {plan.drink.carbs_g:.0f} g koolhydraten, opgelost in "
                     f"{plan.drink.fluid_ml:.0f} ml "
-                    f"({plan.drink.concentration_pct:.1f}% — isotoon is "
-                    f"{rules.ISOTONIC_PCT_LO:.0f}-{rules.ISOTONIC_PCT_HI:.0f}%)"),
+                    f"({plan.drink.concentration_pct:.1f}% — {grens_tekst})"),
         ))
 
     posten = _stations_on_route(plan)
@@ -713,7 +748,7 @@ def _build_carry_list(plan: NutritionPlan, selection: list[Product]) -> None:
         detail += ("; dat is meer dan er op de fiets past — plan bijvullen of "
                    "geef verzorgingsposten op")
     plan.carry.append(CarryItem(
-        label="Bidons", amount=f"{mee}× {rules.BOTTLE_ML:.0f} ml mee", detail=detail))
+        label="Bidons", amount=f"{mee}× {bottle_ml:.0f} ml mee", detail=detail))
 
 
 def _stations_on_route(plan: NutritionPlan) -> list[str]:

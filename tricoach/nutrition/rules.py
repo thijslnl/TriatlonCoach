@@ -13,11 +13,15 @@ van ~60 g/uur; alles daarboven blijft in de darm. Een dual-source product
 (glucose + fructose, ratio ~1:0,8) gebruikt daarnaast de fructosetransporter
 (GLUT5) en haalt het plafond naar ~90 g/uur, bij een getrainde darm tot ~120.
 
-**B. De concentratielimiet van drank.** Sportdrank is isotoon rond 6-8%
-koolhydraten (~30-40 g per 500 ml). Meer koolhydraten in hetzelfde vocht maakt
-de drank hypertoon: de maag leegt trager en de opname kan juist afnemen. De
-planner rekent daarom eerst uit hoeveel koolhydraten er *passen* in het
-geplande vochtvolume en verschuift de rest naar gels.
+**B. De concentratielimiet van drank.** Een gewone hydratatiedrank zonder
+eigen fabrikantopgave wordt begrensd op het isotone bereik, rond 6-8%
+koolhydraten (~30-40 g per 500 ml): meer in hetzelfde vocht maakt de drank
+hypertoon, de maag leegt trager en de opname kan juist afnemen. Geeft de
+fabrikant wél een eigen mengverhouding op — zoals Beta Fuel, bewust
+geconcentreerd op 80 g per 500 ml (16%) — dan geldt díe verhouding als grens
+in plaats van de isotone band. De planner rekent daarom eerst uit hoeveel
+koolhydraten er *passen* in het geplande vochtvolume, tegen de grens die bij
+het gekozen product hoort, en verschuift de rest naar gels.
 
 Zie ``memory/beslissingen.md`` voor de onderbouwing en de bronnen.
 """
@@ -134,17 +138,37 @@ def absorption_cap_g_h(has_dual_source: bool, trained_gut: bool = False) -> floa
 
 # ------------------------------------------------ constraint B: concentratie --
 
-# Isotoon bereik van sportdrank in procenten koolhydraten (g per 100 ml).
+# Isotoon bereik van sportdrank in procenten koolhydraten (g per 100 ml). Dit
+# is de *fallback* voor een drankproduct zonder eigen fabrikantopgave — zie
+# :func:`concentration_cap_pct`.
 ISOTONIC_PCT_LO, ISOTONIC_PCT_HI = 6.0, 8.0
 
 
-def max_carbs_from_fluid_g(fluid_ml: float) -> float:
-    """Hoeveel koolhydraten er maximaal in dit vochtvolume passen (isotoon).
+def concentration_cap_pct(carbs_g: float | None, serving_ml: float | None) -> float:
+    """De concentratielimiet (g per 100 ml) die voor dit drankproduct geldt.
 
-    Boven deze grens wordt de drank hypertoon; de planner verschuift het
+    Geeft de fabrikant een eigen aanbevolen mengverhouding op (koolhydraten
+    per aanbevolen mengvolume, ``carbs_g``/``serving_ml``), dan geldt díe
+    verhouding als grens — een bewust geconcentreerde/hypertone drank zoals
+    Beta Fuel (80 g per 500 ml = 16%) is zo ontworpen en hoort niet te worden
+    afgetopt op de isotone grens die voor gewone hydratatiedrank geldt. Een
+    product zónder eigen opgave (geen ``serving_ml`` of geen koolhydraten)
+    valt terug op de isotone band :data:`ISOTONIC_PCT_HI`.
+    """
+    if carbs_g and serving_ml:
+        return carbs_g / serving_ml * 100
+    return ISOTONIC_PCT_HI
+
+
+def max_carbs_from_fluid_g(fluid_ml: float, max_pct: float = ISOTONIC_PCT_HI) -> float:
+    """Hoeveel koolhydraten er maximaal in dit vochtvolume passen.
+
+    ``max_pct`` is de concentratielimiet (g per 100 ml) die voor het gekozen
+    drankproduct geldt — zie :func:`concentration_cap_pct`. Boven deze grens
+    wordt de drank geconcentreerder dan bedoeld; de planner verschuift het
     overschot dan naar gels in plaats van de bidon zwaarder te maken.
     """
-    return max(fluid_ml, 0.0) * ISOTONIC_PCT_HI / 100
+    return max(fluid_ml, 0.0) * max_pct / 100
 
 
 def concentration_pct(carbs_g: float, fluid_ml: float) -> float | None:

@@ -3287,6 +3287,12 @@ with tab_voeding:
                 "Totale duur (minuten)", min_value=0.0, value=180.0, step=5.0,
                 disabled=not eigen_duur, key="voeding_duur_waarde",
             )
+            bidon_ml = f2.number_input(
+                "Bidongrootte (ml)", min_value=50.0,
+                value=float(voeding_regels.BOTTLE_ML), step=50.0,
+                key="voeding_bidon_ml",
+                help="Bepaalt hoeveel bidons de meeneemlijst adviseert.",
+            )
 
         if st.button("🧮 Bereken plan", type="primary", key="voeding_bereken"):
             legs = [LegRequest(sport=s, distance_m=per_sport[s][0],
@@ -3301,6 +3307,7 @@ with tab_voeding:
                 weight_kg=gewicht or None,
                 target_g_h=doel_g_h if eigen_doel else None,
                 trained_gut=getrainde_darm,
+                bottle_ml=bidon_ml,
                 override_duration_s=duur_min * 60 if eigen_duur else None,
                 planned_date=plandatum,
                 name=f"{SESSION_TYPES[sessietype][0]} {plandatum:%d-%m-%Y}",
