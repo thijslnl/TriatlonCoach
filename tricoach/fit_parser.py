@@ -181,6 +181,24 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
     records = pd.DataFrame(record_rows)
     if not records.empty:
         records["timestamp"] = pd.to_datetime(records["timestamp"])
+        # Garmin's export van een multisport-activiteit (bijv. een brick) kan
+        # per onderdeel een eigen .fit-bestand opleveren waarvan de
+        # record-berichten tóch de hele oorspronkelijke opname bevatten
+        # (fietsen + wissel + lopen), terwijl het session-bericht netjes tot
+        # dit onderdeel beperkt blijft. Zonder bijsnijden lekt dan bijv.
+        # fietstempo de loop-trends in zodra de fietshartslag toevallig in de
+        # loop-zone viel. We knippen daarom op het eigen tijdvenster van de
+        # sessie — alleen als er een echt sessiestart en -duur bekend zijn,
+        # anders blijft alles staan zoals voorheen.
+        eigen_start = summary.get("start_time")
+        duur = summary.get("total_elapsed_time") or summary.get("total_timer_time")
+        if eigen_start and duur:
+            venster_start = pd.Timestamp(eigen_start)
+            venster_einde = venster_start + pd.Timedelta(seconds=float(duur))
+            records = records[
+                (records["timestamp"] >= venster_start)
+                & (records["timestamp"] <= venster_einde)
+            ]
         # GPS van semicircles naar graden; alleen als het horloge een fix had.
         for col in ("lat", "lon"):
             if col in records:
