@@ -136,23 +136,34 @@ def _value(frame: fitdecode.FitDataMessage, name: str):
 
 
 def _crop_to_session(df: pd.DataFrame, summary: dict) -> pd.DataFrame:
-    """Beperk record/lengte-rijen tot het eigen tijdvenster van deze sessie.
+    """Beperk record/lengte-rijen tot het eigen tijdvenster van deze sessie
+    en zet een eventuele afstandskolom terug op 0 bij de start ervan.
 
     Eén bestand kan meerdere sessies bevatten (multisport) waarvan de
-    detailberichten niet netjes per sessie gescheiden zijn; zonder bijsnijden
-    lekt bijv. fietsdata de loopsessie in, of blijft zwemdata onvindbaar
-    tussen twee andere sessies in. Alleen bijgesneden als er een echte
-    sessiestart én -duur bekend zijn — anders blijft alles staan.
+    detailberichten niet netjes per sessie gescheiden zijn: record-berichten
+    van een ander onderdeel lekken anders in, en het ``distance``-veld loopt
+    door vanaf het begin van de hele opname in plaats van bij elke sessie
+    weer bij 0 te beginnen (de loop na zwemmen+fietsen begint dan pas rond
+    de 39 km i.p.v. bij 0) — dat breekt elke berekening die op een
+    bij-0-beginnende afstand rekent (kilometersplits, bakstenen-
+    benenanalyse). Alleen tijd-bijgesneden als er een echte sessiestart én
+    -duur bekend zijn; de afstand wordt altijd genormaliseerd zodra de
+    kolom bestaat, ook zonder tijdvenster.
     """
     if df.empty:
         return df
     eigen_start = summary.get("start_time")
     duur = summary.get("total_elapsed_time") or summary.get("total_timer_time")
-    if not (eigen_start and duur):
-        return df
-    venster_start = pd.Timestamp(eigen_start)
-    venster_einde = venster_start + pd.Timedelta(seconds=float(duur))
-    return df[(df["timestamp"] >= venster_start) & (df["timestamp"] <= venster_einde)]
+    if eigen_start and duur:
+        venster_start = pd.Timestamp(eigen_start)
+        venster_einde = venster_start + pd.Timedelta(seconds=float(duur))
+        df = df[(df["timestamp"] >= venster_start) & (df["timestamp"] <= venster_einde)]
+    if "distance_m" in df.columns:
+        basis = df["distance_m"].min()
+        if pd.notna(basis) and basis:
+            df = df.copy()
+            df["distance_m"] = df["distance_m"] - basis
+    return df
 
 
 # Een sessie zonder één van deze velden heeft niets om op te trainen of te

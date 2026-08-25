@@ -57,6 +57,12 @@ DEFAULT_MAX_GAP_MIN = 25
 # onderdeel al starten terwijl het vorige nog afsluit).
 MIN_GAP_S = -60.0
 
+# Twee sessies van dezelfde sport die binnen dit venster van elkaar starten,
+# zijn vrijwel zeker hetzelfde onderdeel dat door twee toestellen is
+# opgenomen (bijv. een fietscomputer én een multisport-horloge) — niet twee
+# losse herhalingen. Zie _dedupe_simultaneous_same_sport().
+DUPLICATE_START_WINDOW_S = 180.0
+
 # "Bakstenen benen": het eerste stuk van de loop na het fietsen. Primair op
 # afstand (eerste km); zonder afstandsdata op tijd (eerste 5 minuten).
 EERSTE_STUK_M = 1000.0
@@ -136,6 +142,55 @@ def _end_time(row: pd.Series) -> pd.Timestamp:
     return row["start_time"] + pd.Timedelta(seconds=_elapsed_s(row))
 
 
+def _dedupe_simultaneous_same_sport(df: pd.DataFrame) -> pd.DataFrame:
+    """Eén kandidaat per sport wanneer twee toestellen hetzelfde onderdeel
+    opnamen (bijv. een fietscomputer én een multisport-horloge dat ook de
+    zwem- en loopbenen vastlegde).
+
+    Zonder dit filter concurreren beide opnames om dezelfde plek in de
+    keten: de ketendetectie is een simpele lus die per stap maar één
+    kandidaat kiest, dus de eerste in tijd "wint" de aansluiting op het
+    vorige onderdeel — ook als dat toevallig niet de opname is die zelf ook
+    de rest van de keten bevat. Dat splitst één triatlon-training in twee
+    losse bricks.
+
+    Bij twee sessies van dezelfde sport die binnen
+    :data:`DUPLICATE_START_WINDOW_S` van elkaar beginnen, wint degene die
+    hetzelfde archiefbestand deelt met de daaraan voorafgaande sessie in de
+    rij — dat is aantoonbaar dezelfde doorlopende opname, geen gok. Delen ze
+    geen van beide dat bestand (bijv. in tests zonder archief, of gewoon
+    geen multisport-opname), dan verandert er niets: de eerste in tijd
+    blijft gelden, exact het gedrag van vóór dit filter. Geen van beide
+    sessies verdwijnt uit de database of de sessielijst — dit geldt alleen
+    voor het bepalen van de keten.
+    """
+    if df.empty:
+        return df
+    heeft_archief = "archived_path" in df.columns
+    rijen = df.to_dict("records")
+    uit: list[dict] = []
+    i = 0
+    while i < len(rijen):
+        groep = [rijen[i]]
+        j = i + 1
+        while (j < len(rijen)
+               and rijen[j]["sport"] == rijen[i]["sport"]
+               and (rijen[j]["start_time"] - rijen[i]["start_time"]).total_seconds()
+               <= DUPLICATE_START_WINDOW_S):
+            groep.append(rijen[j])
+            j += 1
+        if len(groep) == 1 or not heeft_archief:
+            uit.append(groep[0])
+        else:
+            vorige_bron = uit[-1].get("archived_path") if uit else None
+            match = next((r for r in groep
+                         if vorige_bron and r.get("archived_path") == vorige_bron),
+                        None)
+            uit.append(match or groep[0])
+        i = j
+    return pd.DataFrame(uit)
+
+
 def detect_chains(acts: pd.DataFrame, gap_min: int = DEFAULT_MAX_GAP_MIN) -> list[list[str]]:
     """Vind kandidaat-combinatietrainingen; geeft lijsten van activity_keys.
 
@@ -143,12 +198,16 @@ def detect_chains(acts: pd.DataFrame, gap_min: int = DEFAULT_MAX_GAP_MIN) -> lis
     binnen ``gap_min`` minuten na het einde van de vorige, en de sporten
     strikt oplopen in race-volgorde (zwemmen → fietsen → hardlopen). Ketens
     van twee of drie onderdelen zijn kandidaten; losse sessies met uren
-    ertussen halen de drempel niet en worden dus nooit samengevoegd.
+    ertussen halen de drempel niet en worden dus nooit samengevoegd. Twee
+    bijna-gelijktijdige sessies van dezelfde sport (twee toestellen, één
+    onderdeel) worden eerst tot één kandidaat teruggebracht, zie
+    :func:`_dedupe_simultaneous_same_sport`.
     """
     if acts.empty:
         return []
     df = acts.sort_values("start_time")
     df = df[df["sport"].isin(RACE_ORDER)]
+    df = _dedupe_simultaneous_same_sport(df)
 
     chains: list[list[str]] = []
     keten: list[pd.Series] = []

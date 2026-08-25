@@ -15,7 +15,11 @@ load_activities), alleen het FIT-parsen zelf wordt overgeslagen. Controleert:
 4. bevestigen en losmaken werken, een losgemaakte groep wordt niet opnieuw
    voorgesteld, en alleen bevestigde combos tellen in de trend;
 5. de race-simulatie herkent de rookie-opzet en de feedback-context bevat
-   de wissel- en overgangsdata.
+   de wissel- en overgangsdata;
+6. twee toestellen die dezelfde fietsbeen opnamen (bijv. fietscomputer én
+   multisport-horloge) splitsen een triatlon-training niet in twee losse
+   bricks — de ketendetectie kiest de opname die het archiefbestand deelt
+   met zwemmen/lopen (zie stap 8 hieronder).
 """
 
 # De tests staan in tests/; zet de projectroot op sys.path zodat
@@ -42,7 +46,13 @@ from tricoach.combos import (
     set_combo_status,
 )
 from tricoach.fit_parser import ParsedActivity
-from tricoach.storage import connect, load_activities, load_records, save_activity
+from tricoach.storage import (
+    connect,
+    load_activities,
+    load_records,
+    save_activity,
+    set_archived_path,
+)
 
 BOUNDS = [137, 152, 162, 172]
 CONFIG = {"combo": {"max_gap_min": 25}, "races": [],
@@ -189,6 +199,40 @@ def main() -> None:
     assert "Bakstenen-benen-analyse" in blok and "Rookie" in blok
     print("7. Feedback-context bevat T1/T2, bakstenen-benen-analyse en "
           "race-simulatie ✓")
+
+    # -- Scenario 6: twee toestellen namen dezelfde fietsbeen op (bijv. een
+    #    fietscomputer én een multisport-horloge dat ook zwemmen/lopen
+    #    vastlegde). Zonder het "zelfde archief wint"-filter zou de
+    #    ketendetectie de fietscomputer-opname aan zwemmen koppelen (eerst
+    #    in tijd) en de horloge-opname alleen aan lopen: twee losse bricks
+    #    i.p.v. één triatlon-training.
+    du_zwem = _act("swimming", "2026-07-06 08:00:00+00:00", 1200, 900,
+                   sub_sport="open_water")
+    du_fiets_computer = _act("cycling", "2026-07-06 08:25:00+00:00", 3600, 30000)
+    du_fiets_horloge = _act("cycling", "2026-07-06 08:25:04+00:00", 3605, 30010)
+    du_loop = _act("running", "2026-07-06 09:27:00+00:00", 1800, 5500,
+                   records=_run_records("2026-07-06 09:27:00+00:00"))
+    for act in (du_zwem, du_fiets_computer, du_fiets_horloge, du_loop):
+        save_activity(conn, act, BOUNDS)
+    # Zwem, fiets-horloge en loop delen hetzelfde (fictieve) archiefbestand —
+    # ze komen uit dezelfde multisport-opname; de fietscomputer niet.
+    for act in (du_zwem, du_fiets_horloge, du_loop):
+        set_archived_path(conn, act.activity_key, "uploads/2026/07/multisport.fit")
+    set_archived_path(conn, du_fiets_computer.activity_key,
+                      "uploads/2026/07/fietscomputer.fit")
+
+    nieuw = detect_and_store_proposals(conn, load_activities(conn), 25)
+    combos = load_combos(conn, load_activities(conn))
+    dubbel = [c for c in combos if c["kind"] == "triatlon"
+             and du_loop.activity_key in [m["activity_key"] for m in c["members"]]]
+    assert nieuw == 1 and len(dubbel) == 1, \
+        f"verwacht 1 triatlon-voorstel met de horloge-fietsdata, kreeg {nieuw}/{len(dubbel)}"
+    leden = [m["activity_key"] for m in dubbel[0]["members"]]
+    assert leden == [du_zwem.activity_key, du_fiets_horloge.activity_key,
+                     du_loop.activity_key], leden
+    print("8. Twee toestellen op dezelfde fietsbeen: keten kiest de opname "
+          "die het archief deelt met zwemmen/lopen, één triatlon-training "
+          "i.p.v. twee losse bricks ✓")
 
     conn.close()
     print(f"\nAlle combo-tests geslaagd. (tijdelijke data: {tmp})")
