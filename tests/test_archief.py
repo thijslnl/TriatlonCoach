@@ -114,8 +114,8 @@ def main() -> None:
         # herkent aan de bytes.
         echte_parser = archive.parse_fit
         archive.parse_fit = (
-            lambda stream, source_name: oud
-            if stream.read() == b"oud-origineel" else None)
+            lambda stream, source_name: [oud]
+            if stream.read() == b"oud-origineel" else [])
         try:
             n = archive.migrate_originals(conn, root, [oude_map, tmp / "bestaat_niet"])
         finally:
@@ -144,7 +144,8 @@ def main() -> None:
         }
 
         def stub_parser(stream, source_name):
-            return per_bestand.get(stream.read())
+            gevonden = per_bestand.get(stream.read())
+            return [gevonden] if gevonden is not None else []
 
         uit = archive.verify_originals(conn, parser=stub_parser)
         status = dict(zip(uit["activity_key"], uit["status"]))

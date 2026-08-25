@@ -154,6 +154,7 @@ from tricoach.sportzones import (
     CYCLING,
     RUNNING,
     SWIMMING,
+    TRANSITION,
     bike_lthr,
     bike_lthr_is_estimated,
     ftp as athlete_ftp,
@@ -351,8 +352,13 @@ def run_garmin_sync(client) -> None:
             meldingen.append(f"{a.deleted_kept} verwijderd gebleven")
         if a.errors:
             meldingen.append(f"{len(a.errors)} activiteit(en) mislukt")
+        overgeslagen = {r.parse_warning for r in a.new if r.parse_warning}
+        if overgeslagen:
+            meldingen.append(f"⚠️ {'; '.join(overgeslagen)}")
 
         for r in a.new:
+            if r.activity.sport == TRANSITION:
+                continue  # wisselsessie: geen coach-feedback nodig
             if r.transport_suggested:
                 st.session_state.setdefault("transport_suggesties", []).append(r)
                 continue
@@ -380,6 +386,8 @@ with st.sidebar:
     for race in config.get("races", []):
         race_date = race["date"] if isinstance(race["date"], date) else date.fromisoformat(str(race["date"]))
         days = (race_date - date.today()).days
+        if days < 0:
+            continue  # verstreken races horen niet meer in het "dagen tot"-overzicht
         st.metric(race["name"], f"{days} dagen", help=race.get("distances", ""))
 
     st.divider()
@@ -434,6 +442,10 @@ with st.sidebar:
                     icon = {"nieuw": "✅", "duplicaat": "↩️"}.get(r.status, "🗑️")
                     st.write(f"{icon} {local_time(r.activity.start_time):%d-%m %H:%M} "
                              f"{sport_label(r.activity.sport)} — {r.status}")
+                    if r.parse_warning:
+                        st.warning(
+                            "⚠️ Bij het parsen van dit bestand is een sessie "
+                            f"overgeslagen: {r.parse_warning}")
                     if r.status == "verwijderd":
                         st.caption(
                             "Deze sessie is eerder verwijderd en blijft verwijderd. "
@@ -446,11 +458,14 @@ with st.sidebar:
                         st.caption(f"🌬️ Wind: {r.wind.as_text()}")
                     # Alleen nieuwe sessies krijgen coaching-feedback (Sonnet);
                     # duplicaten niet, dat zou onnodig een API-call kosten.
-                    # Bij een transport-vermoeden (korte, rustige fietsrit)
-                    # wordt de feedback uitgesteld tot de gebruiker de
-                    # suggestie bovenaan de pagina bevestigt of afwijst —
+                    # Een wisselsessie (T1/T2) is geen training en krijgt geen
+                    # feedback. Bij een transport-vermoeden (korte, rustige
+                    # fietsrit) wordt de feedback uitgesteld tot de gebruiker
+                    # de suggestie bovenaan de pagina bevestigt of afwijst —
                     # transport-ritjes horen geen coach-feedback te krijgen.
-                    if r.status == "nieuw" and r.transport_suggested:
+                    if r.status == "nieuw" and r.activity.sport == TRANSITION:
+                        pass
+                    elif r.status == "nieuw" and r.transport_suggested:
                         st.session_state.setdefault("transport_suggesties", []).append(r)
                         st.caption(
                             "🛒 Lijkt een transport-ritje (kort en rustig) — "

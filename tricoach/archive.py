@@ -176,13 +176,17 @@ def migrate_originals(conn: sqlite3.Connection, root: Path,
                 continue
             for naam, data in kandidaten:
                 try:
-                    act = parse_fit(io.BytesIO(data), source_name=naam)
+                    acts = parse_fit(io.BytesIO(data), source_name=naam)
                 except Exception:
                     continue  # geen geldig FIT-bestand: overslaan
-                if act is None or act.activity_key not in bekend:
-                    continue
-                archive_and_register(conn, root, act, data)
-                n += 1
+                # Eén bestand kan meerdere sessies opleveren (multisport); ze
+                # delen dezelfde bytes en dus hetzelfde archief, maar elke
+                # bekende sessie moet z'n eigen archived_path krijgen.
+                for act in acts:
+                    if act.activity_key not in bekend:
+                        continue
+                    archive_and_register(conn, root, act, data)
+                    n += 1
     return n
 
 
@@ -216,10 +220,13 @@ def verify_originals(conn: sqlite3.Connection,
             uit.append({"activity_key": key, "status": "bestand_weg",
                         "detail": pad})
             continue
-        act = parser(io.BytesIO(bestand.read_bytes()), source_name=bestand.name)
+        acts = parser(io.BytesIO(bestand.read_bytes()), source_name=bestand.name)
+        # Bij een multisport-bestand levert de herparse meerdere sessies op;
+        # vergelijk met de sessie die bij déze activity_key hoort.
+        act = next((a for a in acts if a.activity_key == key), None)
         if act is None:
             uit.append({"activity_key": key, "status": "afwijking",
-                        "detail": "bestand is niet (meer) als activiteit te parsen"})
+                        "detail": "bestand is niet (meer) als deze activiteit te parsen"})
             continue
         fouten = _compare(act, key, sport, duur, afstand, avg_hr)
         uit.append({

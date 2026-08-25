@@ -13,6 +13,7 @@ onaangetast origineel bewaard blijft voor verificatie en terugrol.
 """
 
 import sqlite3
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -25,10 +26,11 @@ from tricoach.storage import (
     enrich_power_records,
     is_deleted,
     save_activity,
+    set_excluded_reason,
 )
 from tricoach.trainingslog import append_entry
 from tricoach.transport import suggest_transport
-from tricoach.sportzones import ftp as athlete_ftp, hr_zone_bounds
+from tricoach.sportzones import TRANSITION, ftp as athlete_ftp, hr_zone_bounds
 from tricoach.weather import WindData
 from tricoach.zones import time_in_zones
 
@@ -60,6 +62,11 @@ class ImportResult:
     coach-feedback uit te stellen tot de gebruiker heeft gekozen.
     ``archived`` is het relatieve pad van het gearchiveerde origineel (None
     als archiveren uitstond of de bytes ontbraken).
+
+    ``parse_warning`` draagt een waarschuwing van :func:`tricoach.fit_parser.
+    parse_fit` mee als er in hetzelfde bestand een sessie is overgeslagen
+    (geen sportveld, of geen bruikbare afstand/duur/hartslag) — zodat zo'n
+    sessie nooit stilzwijgend verdwijnt.
     """
 
     activity: ParsedActivity
@@ -72,6 +79,7 @@ class ImportResult:
     enriched: bool = False
     transport_suggested: bool = False
     archived: str | None = None
+    parse_warning: str | None = None
 
 
 def import_zip(
@@ -105,7 +113,22 @@ def import_zip(
     label = (training_label or "").strip() or None
     results = []
 
-    for act in parse_zip(zip_path):
+    # Sessies die parse_fit() niet kon gebruiken (geen sportveld, of geen
+    # bruikbare afstand/duur/hartslag) komen hier als tekst binnen — nooit
+    # stilzwijgend, ze gaan op het eerste importresultaat van deze zip mee.
+    with warnings.catch_warnings(record=True) as gevangen:
+        warnings.simplefilter("always")
+        acts = parse_zip(zip_path)
+    parse_warning = ("; ".join(str(w.message) for w in gevangen)
+                     if gevangen else None)
+
+    for act in acts:
+        # Wisselsessies (T1/T2 uit een multisport-bestand) zijn geen training:
+        # geen LLM-observatie of winddata voor een paar minuten rennen naar de
+        # fiets. Wél gewoon opgeslagen en zichtbaar, zie set_excluded_reason
+        # hieronder.
+        is_wissel = act.sport == TRANSITION
+
         # Eerst dedup-check: duplicaten kosten geen Ollama-, weer- of API-call.
         # Een soft-verwijderde sessie telt óók als bekend en blijft verwijderd:
         # de status "verwijderd" laat de UI uitleggen hoe je hem kunt herstellen.
@@ -118,18 +141,25 @@ def import_zip(
             enriched = enrich_power_records(conn, act, ftp) or enriched
             archived = _archive(conn, uploads_dir, act)
             results.append(ImportResult(act, status, enriched=enriched,
-                                        archived=archived))
+                                        archived=archived,
+                                        parse_warning=parse_warning))
+            parse_warning = None
             continue
 
         # De zonegrenzen zijn sport-afhankelijk: hardlopen op de loop-LTHR,
-        # fietsen op de fiets-LTHR, zwemmen zonder zones (None).
+        # fietsen op de fiets-LTHR, zwemmen en wisselsessies zonder zones (None).
         bounds = hr_zone_bounds(athlete, act.sport)
         tiz = time_in_zones(act.records, bounds) if not act.records.empty else {}
-        observation = observation_fn(act, tiz) if observation_fn else None
-        wind = weather_fn(act) if weather_fn else None
+        observation = observation_fn(act, tiz) if observation_fn and not is_wissel else None
+        wind = weather_fn(act) if weather_fn and not is_wissel else None
 
         save_activity(conn, act, bounds, user_note=note, wind=wind,
                       training_label=label, ftp=ftp)
+        if is_wissel:
+            # Automatisch, niet ter bevestiging: een wisselsessie is
+            # ondubbelzinnig geen training, in tegenstelling tot een
+            # vermoed transport-ritje (zie tricoach.transport).
+            set_excluded_reason(conn, act.activity_key, "wissel")
         archived = _archive(conn, uploads_dir, act)
         append_entry(memory_dir, act, tiz, observation, user_note=note,
                      wind=wind, training_label=label)
@@ -137,8 +167,9 @@ def import_zip(
             act, "nieuw", tiz=tiz, observation=observation, user_note=note,
             training_label=label, wind=wind,
             transport_suggested=suggest_transport(act, config),
-            archived=archived,
+            archived=archived, parse_warning=parse_warning,
         ))
+        parse_warning = None
 
     return results
 

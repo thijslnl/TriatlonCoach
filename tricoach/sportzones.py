@@ -54,6 +54,10 @@ RUNNING = "running"
 CYCLING = "cycling"
 SWIMMING = "swimming"
 
+# Wisselsessie (T1/T2) uit een multisport-.fit-bestand (zie
+# tricoach.fit_parser); geen trainingssport, geen zone-oordeel.
+TRANSITION = "transition"
+
 # Terugval voor de loop-LTHR als er niets is ingesteld (Garmin-schatting
 # juli 2026). Alleen een vangnet: normaal komt de waarde uit config.yaml.
 DEFAULT_RUN_LTHR = 164
@@ -255,7 +259,12 @@ def zone_model(athlete: dict, sport: str, has_power: bool = True) -> ZoneModel:
       tussenoplossing;
     - **fietsen met FTP maar zonder vermogensdata** → hartslagzones op de
       fiets-LTHR, zonder "tussenoplossing"-melding (de rit mist de data, niet
-      de instelling).
+      de instelling);
+    - **elke andere sport** (bijv. ``transition``, een wisselsessie uit een
+      multisport-bestand) → geen zones. Zonder deze regel viel zo'n sessie
+      terug op de hardloop-hartslagzones, puur omdat ze niet zwemmen of
+      fietsen was — een wissel van vijf minuten hoort geen looptrainings-
+      oordeel te krijgen.
     """
     if sport == SWIMMING:
         return ZoneModel(
@@ -263,6 +272,13 @@ def zone_model(athlete: dict, sport: str, has_power: bool = True) -> ZoneModel:
             bounds=[], names=[],
             reason="bij zwemmen sturen we op techniek, afstand en tempo per "
                    "100 m; polshartslag onder water is onbetrouwbaar",
+        )
+
+    if sport not in (RUNNING, CYCLING):
+        return ZoneModel(
+            sport=sport, method=METHOD_NONE, threshold=None, unit="",
+            bounds=[], names=[],
+            reason="geen trainingssport — geen zone-oordeel van toepassing",
         )
 
     if sport == CYCLING:

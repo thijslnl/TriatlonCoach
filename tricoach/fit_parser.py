@@ -9,13 +9,28 @@ Een FIT-bestand bevat verschillende soorten berichten; wij gebruiken er drie:
 - ``length``: alleen bij banenzwemmen — één bericht per baan, met slagtype,
   aantal slagen en tijd. Hieruit volgt SWOLF per baan.
 
-De unieke sleutel van een activiteit is de starttijd uit het ``file_id``-
-bericht (``time_created``): die is per Garmin-activiteit gegarandeerd uniek
-en zit altijd in het bestand zelf, dus deduplicatie blijft werken ongeacht
-hoe het bestand heet.
+**Eén bestand kan meerdere ``session``-berichten bevatten.** Een multisport-
+opname (triatlon, brick) in één ``.fit``-bestand bestaat uit een aparte
+sessie per onderdeel, inclusief de transities (T1/T2) ertussen — bijv.
+zwemmen → transition → fietsen → transition → hardlopen. :func:`parse_fit`
+geeft daarom een *lijst* activiteiten terug, één per sessie, niet één per
+bestand. Elke sessie krijgt zijn eigen tijdvenster: de record- en
+lengte-berichten van het hele bestand worden per sessie bijgesneden op haar
+eigen start en duur, zodat bijv. fietsdata nooit in de loopsessie lekt (of
+zwemdata verdwijnt doordat een latere sessie de samenvatting overschrijft —
+dat was de oorspronkelijke bug, zie ``memory/beslissingen.md``).
+
+De unieke sleutel van een activiteit is normaal de starttijd uit het
+``file_id``-bericht (``time_created``): die is per Garmin-activiteit
+gegarandeerd uniek en zit altijd in het bestand zelf, dus deduplicatie blijft
+werken ongeacht hoe het bestand heet. Bij een bestand met meerdere sessies
+delen ze allemaal dezelfde ``time_created`` (het opnamemoment van de hele
+multisport-activiteit), dus daar geldt de eigen ``start_time`` van de sessie
+als sleutel — die is binnen één bestand altijd uniek.
 """
 
 import io
+import warnings
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,13 +135,47 @@ def _value(frame: fitdecode.FitDataMessage, name: str):
         return None
 
 
-def parse_fit(stream, source_name: str) -> ParsedActivity | None:
-    """Parse één FIT-bestand (bestandsobject of pad) naar een ParsedActivity.
+def _crop_to_session(df: pd.DataFrame, summary: dict) -> pd.DataFrame:
+    """Beperk record/lengte-rijen tot het eigen tijdvenster van deze sessie.
 
-    Geeft None terug als het bestand geen activiteit met session-data is
-    (Garmin-exports kunnen ook settings- of monitoringbestanden bevatten).
+    Eén bestand kan meerdere sessies bevatten (multisport) waarvan de
+    detailberichten niet netjes per sessie gescheiden zijn; zonder bijsnijden
+    lekt bijv. fietsdata de loopsessie in, of blijft zwemdata onvindbaar
+    tussen twee andere sessies in. Alleen bijgesneden als er een echte
+    sessiestart én -duur bekend zijn — anders blijft alles staan.
     """
-    summary: dict = {}
+    if df.empty:
+        return df
+    eigen_start = summary.get("start_time")
+    duur = summary.get("total_elapsed_time") or summary.get("total_timer_time")
+    if not (eigen_start and duur):
+        return df
+    venster_start = pd.Timestamp(eigen_start)
+    venster_einde = venster_start + pd.Timedelta(seconds=float(duur))
+    return df[(df["timestamp"] >= venster_start) & (df["timestamp"] <= venster_einde)]
+
+
+# Een sessie zonder één van deze velden heeft niets om op te trainen of te
+# tonen (geen afstand, geen duur, geen hartslag) en wordt overgeslagen — maar
+# altijd met een waarschuwing, nooit stilzwijgend. GPS hoort hier expliciet
+# niet bij: zwemmen (bad én open water zonder fix) mist per definitie GPS en
+# moet gewoon geïmporteerd worden.
+USABILITY_FIELDS = ("total_distance", "total_timer_time",
+                    "total_elapsed_time", "avg_heart_rate")
+
+
+def parse_fit(stream, source_name: str) -> list[ParsedActivity]:
+    """Parse één FIT-bestand (bestandsobject of pad) naar zijn activiteiten.
+
+    Een gewoon bestand heeft één ``session``-bericht en levert dus één
+    activiteit op. Een multisport-bestand levert er meerdere op — zie de
+    moduledocstring. Geeft een lege lijst terug als het bestand geen enkele
+    bruikbare sessie bevat (Garmin-exports kunnen ook settings- of
+    monitoringbestanden zijn). Een sessie zonder sportveld of zonder enige
+    bruikbare meting (afstand/duur/hartslag) wordt overgeslagen mét een
+    zichtbare ``warnings.warn`` — nooit stilzwijgend.
+    """
+    session_rows: list[dict] = []
     time_created = None
     file_manufacturer = None
     record_rows: list[dict] = []
@@ -152,10 +201,16 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
                     device_rows.append(row)
 
             elif frame.name == "session":
+                # Eigen dict per sessie: een multisport-bestand heeft er
+                # meerdere achter elkaar (zwem/transition/fiets/transition/
+                # loop) en die mogen elkaar niet overschrijven — dat was de
+                # oorspronkelijke bug (alleen de laatste sessie overleefde).
+                row = {}
                 for f in SESSION_FIELDS:
                     val = _value(frame, f)
                     if val is not None:
-                        summary[f] = val
+                        row[f] = val
+                session_rows.append(row)
 
             elif frame.name == "record":
                 row = {}
@@ -174,56 +229,71 @@ def parse_fit(stream, source_name: str) -> ParsedActivity | None:
                 if row.get("length_type") == "active":
                     length_rows.append(row)
 
-    if not summary or "sport" not in summary:
-        return None
+    if not session_rows:
+        return []
 
-    start = pd.Timestamp(summary.get("start_time") or time_created)
-    records = pd.DataFrame(record_rows)
-    if not records.empty:
-        records["timestamp"] = pd.to_datetime(records["timestamp"])
-        # Garmin's export van een multisport-activiteit (bijv. een brick) kan
-        # per onderdeel een eigen .fit-bestand opleveren waarvan de
-        # record-berichten tóch de hele oorspronkelijke opname bevatten
-        # (fietsen + wissel + lopen), terwijl het session-bericht netjes tot
-        # dit onderdeel beperkt blijft. Zonder bijsnijden lekt dan bijv.
-        # fietstempo de loop-trends in zodra de fietshartslag toevallig in de
-        # loop-zone viel. We knippen daarom op het eigen tijdvenster van de
-        # sessie — alleen als er een echt sessiestart en -duur bekend zijn,
-        # anders blijft alles staan zoals voorheen.
-        eigen_start = summary.get("start_time")
-        duur = summary.get("total_elapsed_time") or summary.get("total_timer_time")
-        if eigen_start and duur:
-            venster_start = pd.Timestamp(eigen_start)
-            venster_einde = venster_start + pd.Timedelta(seconds=float(duur))
-            records = records[
-                (records["timestamp"] >= venster_start)
-                & (records["timestamp"] <= venster_einde)
-            ]
+    all_records = pd.DataFrame(record_rows)
+    if not all_records.empty:
+        all_records["timestamp"] = pd.to_datetime(all_records["timestamp"])
         # GPS van semicircles naar graden; alleen als het horloge een fix had.
         for col in ("lat", "lon"):
-            if col in records:
-                records[col] = records[col] * SEMICIRCLE_TO_DEGREES
+            if col in all_records:
+                all_records[col] = all_records[col] * SEMICIRCLE_TO_DEGREES
+    all_lengths = pd.DataFrame(length_rows)
+    if not all_lengths.empty:
+        all_lengths["timestamp"] = pd.to_datetime(all_lengths["timestamp"])
 
-    return ParsedActivity(
-        activity_key=pd.Timestamp(time_created or start).isoformat(),
-        sport=str(summary["sport"]),
-        sub_sport=str(summary.get("sub_sport")) if summary.get("sub_sport") else None,
-        start_time=start,
-        summary=summary,
-        records=records,
-        lengths=pd.DataFrame(length_rows),
-        source_file=source_name,
-        devices=device_rows,
-        file_manufacturer=file_manufacturer,
-    )
+    single = len(session_rows) == 1
+    activities: list[ParsedActivity] = []
+    for summary in session_rows:
+        if "sport" not in summary:
+            warnings.warn(
+                f"{source_name}: sessie zonder sportveld overgeslagen "
+                f"(start={summary.get('start_time')})")
+            continue
+        if not any(summary.get(f) for f in USABILITY_FIELDS):
+            warnings.warn(
+                f"{source_name}: sessie zonder afstand, duur of hartslag "
+                f"overgeslagen (sport={summary.get('sport')}, "
+                f"start={summary.get('start_time')})")
+            continue
+
+        start = pd.Timestamp(summary.get("start_time") or time_created)
+        if single:
+            # Bestaand gedrag ongewijzigd: de sleutel blijft op de
+            # bestandsbrede time_created staan, zodat dedup van al
+            # geïmporteerde sessies intact blijft.
+            key = pd.Timestamp(time_created or start).isoformat()
+        else:
+            # Meerdere sessies delen dezelfde time_created (het opnamemoment
+            # van de hele multisport-activiteit); de eigen sessiestart is
+            # binnen dit bestand wél altijd uniek.
+            key = start.isoformat()
+
+        activities.append(ParsedActivity(
+            activity_key=key,
+            sport=str(summary["sport"]),
+            sub_sport=str(summary.get("sub_sport")) if summary.get("sub_sport") else None,
+            start_time=start,
+            summary=summary,
+            records=_crop_to_session(all_records, summary),
+            lengths=_crop_to_session(all_lengths, summary),
+            source_file=source_name,
+            devices=device_rows,
+            file_manufacturer=file_manufacturer,
+        ))
+
+    return activities
 
 
 def parse_zip(zip_path: Path | str) -> list[ParsedActivity]:
     """Pak een Garmin-exportzip uit en parse alle FIT-bestanden erin.
 
     De zip wordt in het geheugen gelezen; er worden geen bestanden op schijf
-    uitgepakt. Niet-FIT-bestanden worden overgeslagen. Elke activiteit houdt
-    de originele bytes vast (``raw_data``), zodat de import-pipeline het
+    uitgepakt. Niet-FIT-bestanden worden overgeslagen. Eén bestand kan meer
+    dan één activiteit opleveren (multisport, zie :func:`parse_fit`); die
+    komen allemaal in de teruggegeven lijst terecht, elk met dezelfde
+    originele bytes vast (``raw_data``), zodat de import-pipeline het
     onaangetaste origineel kan archiveren (zie :mod:`tricoach.archive`).
     """
     activities = []
@@ -232,8 +302,7 @@ def parse_zip(zip_path: Path | str) -> list[ParsedActivity]:
             if not info.filename.lower().endswith(".fit"):
                 continue
             data = zf.read(info)
-            activity = parse_fit(io.BytesIO(data), source_name=info.filename)
-            if activity is not None:
-                activity.raw_data = data
-                activities.append(activity)
+            for act in parse_fit(io.BytesIO(data), source_name=info.filename):
+                act.raw_data = data
+                activities.append(act)
     return activities

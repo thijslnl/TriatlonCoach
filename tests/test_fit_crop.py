@@ -3,13 +3,14 @@
 Gebruik:  python tests/test_fit_crop.py
 
 Regressietest voor een concrete brick op 13-08-2026: het geëxporteerde
-.fit-bestand van de loopsessie bevatte de récord-berichten van de hele
-opname (fietsen + wissel + lopen), terwijl het session-bericht netjes tot de
-loop beperkt bleef. Zonder bijsnijden lekte het fietstempo de trends in
-(een "tempo in zone 2" van 2:23 min/km i.p.v. de echte ~6:20 min/km) zodra de
-fietshartslag toevallig in de loop-zone viel. ``parse_fit`` snijdt de
-record-DataFrame nu bij op het eigen [start_time, start_time+duur]-venster
-van de sessie zelf.
+.fit-bestand is zelf een multisport-opname (zwem/wissel/fiets/wissel/loop —
+zie ook tests/test_multisport.py), en de loopsessie erin bevatte vóór de fix
+de récord-berichten van de hele opname (fietsen + wissel + lopen) in plaats
+van alleen haar eigen venster. Zonder bijsnijden lekte het fietstempo de
+trends in (een "tempo in zone 2" van 2:23 min/km i.p.v. de echte ~6:20
+min/km) zodra de fietshartslag toevallig in de loop-zone viel. ``parse_fit``
+snijdt de record-DataFrame nu per sessie bij op haar eigen
+[start_time, start_time+duur]-venster.
 
 Draait tegen het echte gearchiveerde origineel in ``uploads/``; dat bestand
 bevat GPS/hartslagdata en gaat niet mee in git (zie .gitignore). Zonder dat
@@ -48,9 +49,13 @@ def test_brick_loop_niet_besmet_door_fietsdata() -> None:
         return
 
     with open(FIXTURE, "rb") as f:
-        act = parse_fit(f, source_name=FIXTURE.name)
+        acts = parse_fit(f, source_name=FIXTURE.name)
 
-    assert act is not None
+    # Dit bestand is zelf een (kleine) multisport-opname; de loopsessie is
+    # waar de oorspronkelijke bug om draaide, dus die pikken we eruit.
+    lopen = [a for a in acts if a.sport == "running"]
+    check("loopsessie gevonden in het bestand", len(lopen) == 1, f"{len(acts)} sessie(s) totaal")
+    act = lopen[0]
     duur = act.summary.get("total_elapsed_time") or act.summary.get("total_timer_time")
     check("sessie is de loop van 13-08-2026", act.sport == "running")
     check("geen records vóór de eigen sessiestart",

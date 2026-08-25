@@ -170,7 +170,10 @@ def run_cadence_spm(avg_cadence: float | None) -> float | None:
 SPORT_NL = {"running": "Hardlopen", "cycling": "Fietsen", "swimming": "Zwemmen",
             # Pseudo-sport voor als-transport-gemarkeerde sessies (zie
             # tricoach.transport): eigen categorie in weekvolume en -totalen.
-            "transport": "Transport"}
+            "transport": "Transport",
+            # Wisselsessie (T1/T2) uit een multisport-bestand (zie
+            # tricoach.fit_parser); telt niet als training, wél zichtbaar.
+            "transition": "Wissel"}
 
 STROKE_NL = {
     "breaststroke": "Schoolslag", "freestyle": "Borstcrawl",

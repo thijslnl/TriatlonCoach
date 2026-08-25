@@ -220,18 +220,22 @@ def resample_track(lat, lon, t=None, interval_m: float = RESAMPLE_M,
 
 # --------------------------------------------------------------------- extractie --
 
-def gps_from_fit(path: Path) -> pd.DataFrame | None:
+def gps_from_fit(path: Path, activity_key: str | None = None) -> pd.DataFrame | None:
     """Lees de GPS-punten uit één (gearchiveerd) FIT-bestand.
 
-    Geeft None als het bestand geen activiteit is; een leeg DataFrame als de
-    activiteit geen positiedata heeft (banenzwemmen, indoortrainer, sessie
-    zonder satellietfix). :func:`tricoach.fit_parser.parse_fit` heeft de
+    ``activity_key`` kiest de juiste sessie als het bestand er meerdere
+    bevat (multisport); zonder opgave (of geen match) geldt de eerste sessie
+    in het bestand, zoals voorheen. Geeft None als het bestand geen bruikbare
+    activiteit oplevert; een leeg DataFrame als de activiteit geen
+    positiedata heeft (banenzwemmen, indoortrainer, sessie zonder
+    satellietfix). :func:`tricoach.fit_parser.parse_fit` heeft de
     semicircles dan al naar graden omgerekend.
     """
     with open(path, "rb") as f:
-        act = parse_fit(f, source_name=path.name)
-    if act is None:
+        acts = parse_fit(f, source_name=path.name)
+    if not acts:
         return None
+    act = next((a for a in acts if a.activity_key == activity_key), acts[0])
     rec = act.records
     if rec.empty or "lat" not in rec or "lon" not in rec:
         return pd.DataFrame(columns=["lat", "lon", "timestamp"])
@@ -309,7 +313,7 @@ def _extract_one(conn: sqlite3.Connection, rij, resample_m: float) -> tuple[str,
         return _register(conn, rij.activity_key, STATUS_NO_FILE, 0, resample_m), 0
 
     try:
-        gps = gps_from_fit(pad)
+        gps = gps_from_fit(pad, activity_key=rij.activity_key)
     except Exception:
         # Een onleesbaar of afgekapt bestand mag de hele verversing niet slopen.
         return _register(conn, rij.activity_key, STATUS_ERROR, 0, resample_m), 0

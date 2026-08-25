@@ -14,6 +14,7 @@ from tricoach.formatting import derive_speed_ms
 from tricoach.progress import trimp_per_session
 from tricoach.storage import load_records
 from tricoach.swim import crawl_swolf, lane_meters
+from tricoach.transport import TRANSPORT_REASON
 from tricoach.zones import ZONE_NAMES, intensity_category
 
 
@@ -26,14 +27,18 @@ def add_week(activities: pd.DataFrame) -> pd.DataFrame:
 
 
 def _transport_as_sport(df: pd.DataFrame) -> pd.DataFrame:
-    """Geef transport-sessies (excluded_reason) de pseudo-sport "transport".
+    """Geef transport-sessies (``excluded_reason == "transport"``) de
+    pseudo-sport "transport".
 
     Zo verschijnen ze in weekvolumes en -totalen als eigen categorie in
     plaats van dat een ritje naar het zwembad als fietstraining meetelt.
+    Andere uitsluitingsredenen (bijv. "wissel" bij een T1/T2-sessie uit een
+    multisport-bestand) houden hun eigen sport — dat zijn geen transport-
+    ritjes en horen niet in die categorie te verdwijnen.
     """
     df = df.copy()
     if "excluded_reason" in df:
-        df.loc[df["excluded_reason"].notna(), "sport"] = "transport"
+        df.loc[df["excluded_reason"] == TRANSPORT_REASON, "sport"] = "transport"
     return df
 
 

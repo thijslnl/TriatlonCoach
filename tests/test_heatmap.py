@@ -261,7 +261,7 @@ def test_cache_en_filters(tmp: Path) -> None:
     }
     echte_gps_uit_fit = hm.gps_from_fit
 
-    def nep_gps(pad: Path) -> pd.DataFrame:
+    def nep_gps(pad: Path, activity_key: str | None = None) -> pd.DataFrame:
         key = pad.stem
         geparst.append(key)
         lat, lon = lijnen[key]
@@ -293,7 +293,7 @@ def test_cache_en_filters(tmp: Path) -> None:
         conn.execute("DELETE FROM track_extract WHERE activity_key = 'loop'")
         conn.commit()
 
-        def stukke_gps(pad: Path):
+        def stukke_gps(pad: Path, activity_key: str | None = None):
             raise ValueError("afgekapt FIT-bestand")
 
         hm.gps_from_fit = stukke_gps
