@@ -38,7 +38,6 @@ from tricoach.analysis import (
     weekly_volume,
     weekly_zone_time,
 )
-from tricoach.chat import answer_question
 from tricoach.combos import (
     combo_history,
     combo_membership,
@@ -84,6 +83,7 @@ from tricoach.progress import (
     decoupling,
     efficiency_factor,
     load_curves,
+    next_race,
     personal_records,
     progress_summary_text,
     race_distances,
@@ -809,10 +809,10 @@ render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
  tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_voeding, tab_coach,
- tab_chat, tab_heatmap, tab_log, tab_settings) = st.tabs(
+ tab_heatmap, tab_log, tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
      "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🥤 Voeding", "🧠 Coach",
-     "💬 Chat", "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
+     "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -1374,7 +1374,7 @@ with tab_voortgang:
     fig.update_layout(height=640, hovermode="x unified")
     # Racedatum alleen markeren als hij (bijna) in beeld is; anders rekt de
     # lijn de hele datum-as op tot maanden zonder data.
-    race = (config.get("races") or [{}])[0]
+    race = next_race(config)
     if race.get("date"):
         race_dt = pd.Timestamp(str(race["date"]))
         if race_dt <= pd.Timestamp(curves["datum"].max()) + pd.Timedelta(days=45):
@@ -3589,33 +3589,6 @@ with tab_coach:
             st.error(str(e))
 
 # -------------------------------------------------------------------- chat --
-with tab_chat:
-    st.subheader("💬 Vragen over je data")
-    escaleer = st.toggle(
-        "Vraag de cloud-coach (Anthropic API)",
-        help="Uit = lokaal Ollama-model (gratis, onbeperkt). "
-             "Aan = Anthropic API, voor vragen die echt redeneerwerk vragen.",
-    )
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    for vraag, antwoord, bron in st.session_state.chat_history:
-        st.chat_message("user").write(vraag)
-        st.chat_message("assistant").write(f"{antwoord}\n\n_— {bron}_")
-
-    if vraag := st.chat_input("Bijv.: hoeveel uur heb ik deze week getraind?"):
-        st.chat_message("user").write(vraag)
-        bron = "Anthropic (cloud)" if escaleer else "Ollama (lokaal)"
-        try:
-            with st.spinner(f"Antwoord van {bron}..."):
-                antwoord = answer_question(
-                    router, conn, MEMORY_DIR, vraag,
-                    escalate=escaleer, config=config)
-        except Exception as e:
-            antwoord = f"Er ging iets mis: {e}"
-        st.chat_message("assistant").write(f"{antwoord}\n\n_— {bron}_")
-        st.session_state.chat_history.append((vraag, antwoord, bron))
-
 # ----------------------------------------------------------------- heatmap --
 # Voor de lol, geen trainingsanalyse: alle GPS-tracks op één donkere kaart,
 # feller waar vaker gereden/gelopen. De rekenketen zit in tricoach.heatmap;

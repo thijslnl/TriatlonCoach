@@ -18,6 +18,7 @@ Vier blokken, allemaal gevoed door de SQLite-data:
 
 import math
 import sqlite3
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -232,6 +233,34 @@ def decoupling(conn: sqlite3.Connection, acts: pd.DataFrame,
 # Standaard/olympische afstand als terugval wanneer een race geen
 # gestructureerde afstanden heeft (of er nog geen race is ingesteld).
 STANDARD_RACE = {"swim_m": 1500.0, "bike_m": 40000.0, "run_m": 10000.0}
+
+
+def next_race(config: dict, today: date | None = None) -> dict:
+    """De eerstvolgende race op het programma (kleinste datum >= vandaag).
+
+    Races met een datum in het verleden worden overgeslagen — een race die
+    al gereden is, hoort de racevoorspelling en de fitheidsgrafiek niet meer
+    te sturen. Zijn ze allemaal al geweest (bijv. na het laatste seizoen,
+    voordat de volgende race is ingevoerd), dan valt dit terug op de laatst
+    ingevoerde race, zodat de pagina geen lege/kapotte staat toont. Zonder
+    enige race levert dit een lege dict, waarop :func:`race_distances`
+    correct terugvalt op de standaardafstand.
+    """
+    races = config.get("races") or []
+    if not races:
+        return {}
+    vandaag = today or date.today()
+    aankomend = []
+    for race in races:
+        ruwe_datum = race.get("date")
+        if not ruwe_datum:
+            continue
+        race_date = ruwe_datum if isinstance(ruwe_datum, date) else date.fromisoformat(str(ruwe_datum))
+        if race_date >= vandaag:
+            aankomend.append((race_date, race))
+    if aankomend:
+        return min(aankomend, key=lambda x: x[0])[1]
+    return races[-1]
 
 
 def race_distances(race: dict | None) -> dict:
