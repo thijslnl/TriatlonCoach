@@ -133,13 +133,30 @@ def pace_at_hr(
     meetpunten binnen ``hr_range`` (bijv. Z2).
 
     Dit is de belangrijkste trendmaat: wordt het tempo bij dezelfde hartslag
-    sneller, dan groeit de aerobe basis. Sessies met minder dan
-    ``min_seconds`` aan meetpunten in de range worden overgeslagen, anders
-    vertekenen een paar losse seconden het beeld.
+    sneller, dan groeit de aerobe basis. Twee filters houden hem zuiver:
+
+    - **Alleen rustige sessies** (``intensity_category`` op de eigen
+      z1_s..z5_s-verdeling). Tijdens een intervaltraining of tempoloop komt
+      de hartslag bij het opwarmen, of tussen herhalingen door, best een
+      paar minuten in de zone-2-band — maar het tempo op dat moment wisselt
+      dan tussen uitlopen (traag) en de volgende herhaling induiken (snel).
+      Zonder dit filter levert zo'n overwegend harde sessie een misleidende
+      uitschieter op: genoeg zone-2-hartslagseconden om de drempel te halen,
+      maar het gemiddelde tempo daarover betekent niets (bevestigd op een
+      echte sessie: 87% van de tijd in Z3, en toch >5 min "zone 2" tempo van
+      8:54/km terwijl de sessie als geheel op 6:55/km liep).
+    - Sessies met minder dan ``min_seconds`` aan meetpunten in de range
+      worden overgeslagen, anders vertekenen een paar losse seconden het
+      beeld.
     """
     lo, hi = hr_range
     rows = []
     for _, act in activities[activities["sport"] == sport].iterrows():
+        categorie = intensity_category(
+            act.get("z1_s") or 0, act.get("z2_s") or 0, act.get("z3_s") or 0,
+            act.get("z4_s") or 0, act.get("z5_s") or 0)
+        if categorie != "rustig":
+            continue
         rec = load_records(conn, act["activity_key"])
         if rec.empty or "heart_rate" not in rec:
             continue

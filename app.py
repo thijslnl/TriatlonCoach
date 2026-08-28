@@ -1140,10 +1140,13 @@ with tab_trends:
     st.caption(
         "De belangrijkste grafiek: gemiddeld tempo van alle meetpunten binnen zone 2, "
         "per sessie. Sneller worden bij dezelfde hartslag = grotere aerobe basis. "
-        "Sessies met minder dan 5 minuten in zone 2 worden weggelaten. Zone 2 "
-        f"loopt bij hardlopen van {RUN_Z2[0]} tot {RUN_Z2[1]} (loop-LTHR "
-        f"{run_lthr(ATHLETE)}) en bij fietsen van {BIKE_Z2[0]} tot {BIKE_Z2[1]} "
-        f"(fiets-LTHR {bike_lthr(ATHLETE)}) — elke sport tegen zijn eigen drempel."
+        "Alleen rustige sessies tellen mee — een intervaltraining of tempoloop kan "
+        "tijdens het opwarmen kort door zone 2 komen, maar dat tempo zegt dan niets "
+        "over je aerobe basis. Ook sessies met minder dan 5 minuten in zone 2 worden "
+        f"weggelaten. Zone 2 loopt bij hardlopen van {RUN_Z2[0]} tot {RUN_Z2[1]} "
+        f"(loop-LTHR {run_lthr(ATHLETE)}) en bij fietsen van {BIKE_Z2[0]} tot "
+        f"{BIKE_Z2[1]} (fiets-LTHR {bike_lthr(ATHLETE)}) — elke sport tegen zijn "
+        "eigen drempel."
     )
 
     col_run, col_bike = st.columns(2)
@@ -1182,7 +1185,7 @@ with tab_trends:
         if 0 < len(run_trend) < n_runs:
             st.caption(
                 f"{n_runs - len(run_trend)} van je {n_runs} loopsessies is weggelaten: "
-                "minder dan 5 minuten in zone 2 (die sessie was vrijwel volledig Z3+)."
+                "overwegend geen rustige sessie, of minder dan 5 minuten in zone 2."
             )
 
     with col_bike:
@@ -1217,7 +1220,7 @@ with tab_trends:
         if 0 < len(bike_trend) < n_rides:
             st.caption(
                 f"{n_rides - len(bike_trend)} van je {n_rides} fietssessies is weggelaten: "
-                "minder dan 5 minuten in zone 2."
+                "overwegend geen rustige sessie, of minder dan 5 minuten in zone 2."
             )
 
     st.divider()
