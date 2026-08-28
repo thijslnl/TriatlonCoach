@@ -57,6 +57,23 @@ def weekly_volume(activities: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("week")
 
 
+def weekly_running_km(activities: pd.DataFrame) -> pd.DataFrame:
+    """Loopkilometers per week (kolommen: ``week``, ``km``).
+
+    Voor de kracht-herstelgrafiek, die loopvolume naast krachtvolume en
+    wellnessdata zet. Geef ``training_activities(...)`` mee: een transportrit
+    of een wisselsegment is geen looptraining.
+    """
+    lopen = activities[activities["sport"] == "running"]
+    if lopen.empty:
+        return pd.DataFrame(columns=["week", "km"])
+    df = add_week(lopen)
+    out = df.groupby("week", as_index=False)["distance_m"].sum().rename(
+        columns={"distance_m": "km"})
+    out["km"] = out["km"] / 1000
+    return out.sort_values("week").reset_index(drop=True)
+
+
 def weekly_zone_time(activities: pd.DataFrame) -> pd.DataFrame:
     """Minuten per hartslagzone per week (lange vorm: week, zone, minuten)."""
     df = add_week(activities)
