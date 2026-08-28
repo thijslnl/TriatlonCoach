@@ -279,6 +279,11 @@ def _reconcile_freezes(conn: sqlite3.Connection, today: date | None = None) -> s
     return bevroren
 
 
+def frozen_days(conn: sqlite3.Connection, today: date | None = None) -> set[date]:
+    """De dagen die momenteel door een freeze gered zijn (voor de kalenderheatmap)."""
+    return _reconcile_freezes(conn, today)
+
+
 def streak_stats(conn: sqlite3.Connection, today: date | None = None) -> dict:
     """Eén aanroep die de complete statistiektab voedt."""
     ensure_tables(conn)

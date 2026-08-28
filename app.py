@@ -20,8 +20,10 @@ import streamlit as st
 import dotenv
 
 from tricoach import body
+from tricoach import coretraining
 from tricoach import heatmap as heatmap_mod
 from tricoach import garmin_sync
+from tricoach import streak as streak_mod
 from tricoach import wellness
 from tricoach import profile as profile_mod
 from tricoach.advice import generate_advice, generate_insights, last_advice, last_insights
@@ -34,10 +36,14 @@ from tricoach.analysis import (
     swim_length_matrix,
     swim_per_session,
     weekly_intensity_share,
+    weekly_running_km,
     weekly_totals,
     weekly_volume,
     weekly_zone_time,
 )
+from tricoach.strength import catalog as kracht_catalog
+from tricoach.strength import rules as kracht_regels
+from tricoach.strength import store as kracht_opslag
 from tricoach.combos import (
     combo_history,
     combo_membership,
@@ -62,20 +68,6 @@ from tricoach.formatting import (
     stroke_label,
 )
 from tricoach.memory_review import MAX_LEEFTIJD_WEKEN, review_dataframe
-from tricoach.nutrition import products as voeding_producten
-from tricoach.nutrition import rules as voeding_regels
-from tricoach.nutrition import store as voeding_opslag
-from tricoach.nutrition.duration import LegRequest, estimate_duration
-from tricoach.nutrition.explain import explain_plan
-from tricoach.nutrition.plan import (
-    INTENSITY_LABEL,
-    SESSION_TYPES,
-    SEVERITY_WARNING,
-    AidStation,
-    PlanRequest,
-    build_plan,
-    legs_for,
-)
 from tricoach.progress import (
     acwr_status,
     best_efforts,
@@ -808,11 +800,11 @@ render_transport_suggesties()
 render_upload_feedback()
 
 (tab_overzicht, tab_trends, tab_voortgang, tab_sessie, tab_lopen, tab_fietsen,
- tab_zwemmen, tab_bricks, tab_lichaam, tab_herstel, tab_voeding, tab_coach,
- tab_heatmap, tab_log, tab_settings) = st.tabs(
+ tab_zwemmen, tab_bricks, tab_kracht, tab_core, tab_lichaam, tab_herstel,
+ tab_coach, tab_heatmap, tab_log, tab_settings) = st.tabs(
     ["📋 Overzicht", "📈 Trends", "🚀 Voortgang", "🔍 Sessie", "🏃 Lopen", "🚴 Fietsen",
-     "🏊 Zwemmen", "🧱 Bricks", "🧍 Lichaam", "🌙 Herstel", "🥤 Voeding", "🧠 Coach",
-     "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
+     "🏊 Zwemmen", "🧱 Bricks", "🏋️ Kracht", "🧘 Core", "🧍 Lichaam", "🌙 Herstel",
+     "🧠 Coach", "🗺️ Heatmap", "📖 Logboek", "⚙️ Instellingen"]
 )
 
 # --------------------------------------------------------------- overzicht --
@@ -1499,8 +1491,8 @@ with tab_voortgang:
         "Ruwe schatting: lopen via Riegel-schaling vanaf je beste recente loop, fietsen via je "
         "snelste rit (≥15 km), zwemmen via het tempo van je laatste zwemsessie — dat verandert "
         "nu het snelst, dus deze voorspelling wordt elke zwemsessie beter. Racedag-effecten "
-        "(wetsuit, drafting, spanning) zitten er niet in. De afstanden volgen de eerste race "
-        "op de instellingen-tab."
+        "(wetsuit, drafting, spanning) zitten er niet in. De afstanden volgen de eerstvolgende "
+        "race op de instellingen-tab."
     )
     for emoji, tekst in readiness(trainingen, race):
         st.markdown(f"{emoji} {tekst}")
@@ -2776,6 +2768,640 @@ with tab_bricks:
             "eerste stuk richting 0, dan werpt de brick-training vruchten af."
         )
 
+# ------------------------------------------------------------------ kracht --
+with tab_kracht:
+    st.subheader("🏋️ Kracht")
+
+    def _format_set_kort(row, load_type: str) -> str:
+        kant = f" ({row.get('side')})" if row.get("side") not in (None, "", "both") else ""
+        if load_type == "weight":
+            return f"{row.get('reps') or 0}× {row.get('weight_kg') or 0:g} kg{kant}"
+        if load_type == "bodyweight":
+            return f"{row.get('reps') or 0}×{kant}"
+        if load_type == "time":
+            return f"{int(row.get('seconds') or 0)} sec{kant}"
+        if load_type == "distance":
+            return f"{row.get('meters') or 0:g} m{kant}"
+        return ""
+
+    KRACHT_METRIEK_LABELS = {
+        "e1rm": "Beste e1RM", "volume_kg": "Meeste volume",
+        "total_reps": "Meeste reps", "total_seconds": "Langste tijd",
+        "total_meters": "Verste afstand",
+    }
+
+    def _kracht_metriek_waarde(metriek: str, waarde) -> str:
+        if metriek == "e1rm":
+            return f"{waarde:.1f} kg"
+        if metriek == "volume_kg":
+            return f"{waarde:.0f} kg"
+        if metriek == "total_reps":
+            return f"{int(waarde)}"
+        if metriek == "total_seconds":
+            return fmt_duration(waarde)
+        if metriek == "total_meters":
+            return f"{waarde:.0f} m"
+        return str(waarde)
+
+    kracht_fase = kracht_regels.current_phase(config)
+    sessie_tab, voortgang_tab, kracht_beheer_tab = st.tabs(
+        ["💪 Sessie", "📈 Voortgang", "🛠️ Beheer"])
+
+    # -------------------------------------------------------------- sessie --
+    with sessie_tab:
+        open_wo = kracht_opslag.open_workout(conn)
+
+        if open_wo is None:
+            actieve_templates = kracht_catalog.load_templates(conn, only_active=True)
+            if actieve_templates.empty:
+                st.warning("Nog geen actieve sjablonen — voeg er een toe via Beheer.")
+            else:
+                voorstel = kracht_opslag.next_template(conn)
+                keuzes = actieve_templates.to_dict("records")
+                ids = [t["id"] for t in keuzes]
+                labels = {t["id"]: f"{t['code']} — {t['name']}" for t in keuzes}
+                default_idx = (ids.index(voorstel["id"])
+                               if voorstel and voorstel["id"] in ids else 0)
+                gekozen_tid = st.selectbox(
+                    "Sjabloon", ids, index=default_idx, format_func=lambda i: labels[i],
+                    key="kracht_template_keuze")
+                if voorstel and gekozen_tid == voorstel["id"]:
+                    st.caption(f"Voorgesteld op basis van de rotatie: {labels[voorstel['id']]}.")
+
+                conflicten = kracht_regels.check_session_conflict(
+                    trainingen, date.today(), ATHLETE)
+                if conflicten:
+                    st.warning("⚠️ Kwaliteitssessie dichtbij: " +
+                              " · ".join(c["label"] for c in conflicten) +
+                              " — overweeg de belasting vandaag.")
+
+                if kracht_regels.suggest_deload(kracht_opslag.load_workouts(conn)):
+                    st.info(f"💡 {kracht_regels.DELOAD_MELDING}")
+
+                c1, c2 = st.columns(2)
+                benen = c1.slider("Hoe voelen de benen?", 1, 5, 3,
+                                  help="1 = zwaar/moe, 5 = fris", key="kracht_legs_feel")
+                is_deload = c2.checkbox("Deload-sessie (verlaagde belasting)",
+                                        key="kracht_is_deload")
+
+                if st.button("▶️ Start sessie", type="primary", key="kracht_start"):
+                    kracht_opslag.start_workout(
+                        conn, int(gekozen_tid), kracht_fase, legs_feel=benen,
+                        is_deload=is_deload)
+                    st.rerun()
+        else:
+            workout_id = int(open_wo["id"])
+            fase = int(open_wo["phase"])
+            st.markdown(
+                f"**Sessie {open_wo['template_code_snapshot']}** — fase {fase}"
+                + (" · 🔵 deload" if open_wo["is_deload"] else ""))
+            st.caption("Elke set wordt direct opgeslagen — je kan gerust tussentijds "
+                      "wegnavigeren en later verdergaan.")
+
+            items = (kracht_catalog.load_template_items(conn, open_wo["template_id"], only_active=True)
+                     if open_wo["template_id"] else pd.DataFrame())
+            alle_sets = kracht_opslag.load_sets(conn, workout_id=workout_id)
+
+            if items.empty:
+                st.info("Dit sjabloon heeft geen actieve oefeningen (meer).")
+            else:
+                for _, item in items.iterrows():
+                    exercise_id = int(item["exercise_id"])
+                    target_sets, target_reps_text = kracht_regels.phase_target(item.to_dict(), fase)
+                    eigen_sets = (alle_sets[alle_sets["exercise_id"] == exercise_id]
+                                 if not alle_sets.empty else alle_sets)
+                    vorige = kracht_opslag.last_values_for_exercise(
+                        conn, exercise_id, exclude_workout_id=workout_id)
+
+                    titel = (f"{item['exercise_name']} — doel {target_sets or '?'}×"
+                            f"{target_reps_text or '?'}"
+                            + (f" · {len(eigen_sets)} gelogd" if not eigen_sets.empty else ""))
+                    with st.expander(titel, expanded=eigen_sets.empty):
+                        if item["cue"]:
+                            st.caption(f"💡 {item['cue']}")
+                        if item["search_term"]:
+                            st.caption(f"🔎 zoek: _{item['search_term']}_")
+                        if not vorige.empty:
+                            st.caption("Vorige keer: " + " · ".join(
+                                _format_set_kort(r, item["load_type"]) for _, r in vorige.iterrows()))
+
+                        if not eigen_sets.empty:
+                            for _, s in eigen_sets.iterrows():
+                                sc1, sc2 = st.columns([5, 1])
+                                sc1.write(
+                                    f"Set {s['set_number']}"
+                                    + (" 🔥" if s["is_warmup"] else "") + ": "
+                                    + _format_set_kort(s, item["load_type"]))
+                                if sc2.button("🗑️", key=f"kracht_delset_{s['id']}"):
+                                    kracht_opslag.delete_set(conn, int(s["id"]))
+                                    st.rerun()
+
+                        st.markdown("**Nieuwe set**")
+                        volgend_nummer = (int(eigen_sets["set_number"].max()) + 1
+                                          if not eigen_sets.empty else 1)
+                        is_opwarm = st.checkbox("Opwarmset", key=f"kracht_warmup_{exercise_id}")
+                        k1, k2, k3, k4 = st.columns(4)
+                        reps_val = weight_val = seconds_val = meters_val = None
+                        side_val = "both"
+                        if item["load_type"] in ("weight", "bodyweight"):
+                            reps_val = k1.number_input(
+                                "Reps", min_value=0, step=1, key=f"kracht_reps_{exercise_id}")
+                        if item["load_type"] == "weight":
+                            weight_val = k2.number_input(
+                                "Gewicht (kg)", min_value=0.0, step=1.25,
+                                key=f"kracht_weight_{exercise_id}")
+                        if item["load_type"] == "time":
+                            seconds_val = k1.number_input(
+                                "Seconden", min_value=0, step=5, key=f"kracht_sec_{exercise_id}")
+                        if item["load_type"] == "distance":
+                            meters_val = k1.number_input(
+                                "Meters", min_value=0.0, step=1.0, key=f"kracht_m_{exercise_id}")
+                        if item["per_side"]:
+                            side_val = k3.selectbox(
+                                "Kant", ["left", "right"], format_func=lambda s: "links" if s == "left" else "rechts",
+                                key=f"kracht_side_{exercise_id}")
+                        rpe_val = k4.number_input(
+                            "RPE", min_value=0.0, max_value=10.0, step=0.5,
+                            key=f"kracht_rpe_{exercise_id}")
+
+                        if st.button("➕ Set toevoegen", key=f"kracht_addset_{exercise_id}"):
+                            kracht_opslag.log_set(
+                                conn, workout_id, exercise_id, volgend_nummer,
+                                reps=reps_val or None, weight_kg=weight_val or None,
+                                seconds=seconds_val or None, meters=meters_val or None,
+                                side=side_val, rpe=rpe_val or None, is_warmup=is_opwarm)
+                            st.rerun()
+
+            st.divider()
+            with st.form("kracht_afsluiten"):
+                st.markdown("**Sessie afsluiten**")
+                session_rpe = st.number_input(
+                    "Sessie-RPE", min_value=0.0, max_value=10.0, step=0.5,
+                    key="kracht_session_rpe")
+                notities = st.text_area("Notities", key="kracht_notities")
+                if st.form_submit_button("✅ Sessie afronden"):
+                    kracht_opslag.complete_workout(conn, workout_id, session_rpe or None, notities)
+                    st.rerun()
+            with st.expander("🗑️ Per ongeluk gestart — deze sessie verwijderen"):
+                st.caption("Sets blijven bewaard maar de sessie telt niet meer mee in "
+                          "de rotatie, voortgang of weekvolume.")
+                if st.button("🗑️ Verwijderen", key="kracht_del_sessie"):
+                    kracht_opslag.soft_delete_workout(conn, workout_id)
+                    st.rerun()
+
+    # ----------------------------------------------------------- voortgang --
+    with voortgang_tab:
+        alle_oefeningen = kracht_catalog.load_exercises(conn)
+        if alle_oefeningen.empty:
+            st.info("Nog geen oefeningen.")
+        else:
+            opties = alle_oefeningen.to_dict("records")
+            labels = {o["id"]: o["name"] + ("" if o["is_active"] else " (inactief)")
+                     for o in opties}
+            gekozen_id = st.selectbox(
+                "Oefening", [o["id"] for o in opties], format_func=lambda i: labels[i],
+                key="kracht_voortgang_oefening")
+            gekozen = alle_oefeningen[alle_oefeningen["id"] == gekozen_id].iloc[0]
+            load_type = gekozen["load_type"]
+
+            alle_workouts = kracht_opslag.load_workouts(conn)
+            sets = kracht_opslag.load_sets(conn, exercise_id=int(gekozen_id))
+            reeks = kracht_regels.progression_series(sets, alle_workouts, load_type)
+
+            if reeks.empty:
+                st.info("Nog geen gelogde sets voor deze oefening.")
+            else:
+                records = kracht_regels.personal_records(reeks, load_type)
+                if records:
+                    kolommen = st.columns(len(records))
+                    for col, (metriek, info) in zip(kolommen, records.items()):
+                        col.metric(
+                            KRACHT_METRIEK_LABELS.get(metriek, metriek),
+                            _kracht_metriek_waarde(metriek, info["waarde"]),
+                            help=f"{pd.Timestamp(info['datum']):%d-%m-%Y}")
+
+                niet_deload = reeks[~reeks["is_deload"]]
+                deload = reeks[reeks["is_deload"]]
+                if load_type == "weight":
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=niet_deload["started_at"], y=niet_deload["e1rm"],
+                        mode="lines+markers", name="e1RM (kg)"))
+                    if not deload.empty:
+                        fig.add_trace(go.Scatter(
+                            x=deload["started_at"], y=deload["e1rm"], mode="markers",
+                            marker=dict(symbol="diamond-open", size=11), name="Deload"))
+                    fig.update_layout(title=f"{gekozen['name']} — geschat 1RM (Epley)")
+                    date_xaxis(fig, reeks["started_at"])
+                    chart(fig, key="kracht_1rm")
+
+                    fig2 = px.bar(reeks, x="started_at", y="volume_kg",
+                                 labels={"started_at": "", "volume_kg": "Volume (kg)"})
+                    fig2.update_layout(title="Volume per sessie")
+                    date_xaxis(fig2, reeks["started_at"])
+                    chart(fig2, show_legend=False, key="kracht_volume")
+                elif load_type == "bodyweight":
+                    fig = px.bar(reeks, x="started_at", y="total_reps",
+                                labels={"started_at": "", "total_reps": "Totaal reps"})
+                    date_xaxis(fig, reeks["started_at"])
+                    chart(fig, show_legend=False, key="kracht_reps")
+                elif load_type == "time":
+                    reeks = reeks.assign(minuten=reeks["total_seconds"] / 60)
+                    fig = px.bar(reeks, x="started_at", y="minuten",
+                                labels={"started_at": "", "minuten": "Minuten"})
+                    date_xaxis(fig, reeks["started_at"])
+                    chart(fig, show_legend=False, key="kracht_tijd")
+                elif load_type == "distance":
+                    fig = px.bar(reeks, x="started_at", y="total_meters",
+                                labels={"started_at": "", "total_meters": "Meters"})
+                    date_xaxis(fig, reeks["started_at"])
+                    chart(fig, show_legend=False, key="kracht_afstand")
+
+        st.divider()
+        st.subheader("Herstel: rustpols, HRV, loopvolume & krachtvolume")
+        wdf = wellness.load_wellness(conn)
+        if not wdf.empty:
+            wdf = wdf.copy()
+            wdf["week"] = kracht_regels.iso_week_label(wdf["day"])
+            rust_week = wdf.dropna(subset=["resting_hr"]).groupby(
+                "week", as_index=False)["resting_hr"].mean()
+            hrv_week = wdf.dropna(subset=["hrv_last_night"]).groupby(
+                "week", as_index=False)["hrv_last_night"].mean()
+        else:
+            rust_week = pd.DataFrame(columns=["week", "resting_hr"])
+            hrv_week = pd.DataFrame(columns=["week", "hrv_last_night"])
+        loop_week = weekly_running_km(trainingen)
+        vol_week = kracht_opslag.weekly_strength_volume(conn)
+        herstel = (rust_week.merge(hrv_week, on="week", how="outer")
+                  .merge(loop_week, on="week", how="outer")
+                  .merge(vol_week, on="week", how="outer")
+                  .sort_values("week").reset_index(drop=True))
+        if herstel.empty:
+            st.info("Nog niet genoeg data voor de herstelgrafiek.")
+        else:
+            fig = make_subplots(
+                rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+                subplot_titles=("Rustpols (bpm)", "HRV (ms)", "Loop-km/week",
+                               "Krachtvolume (kg)/week"))
+            fig.add_trace(go.Scatter(x=herstel["week"], y=herstel["resting_hr"],
+                                    mode="lines+markers", name="Rustpols"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=herstel["week"], y=herstel["hrv_last_night"],
+                                    mode="lines+markers", name="HRV"), row=2, col=1)
+            fig.add_trace(go.Bar(x=herstel["week"], y=herstel["km"], name="Loop-km"),
+                         row=3, col=1)
+            fig.add_trace(go.Bar(x=herstel["week"], y=herstel["volume_kg"],
+                                name="Krachtvolume"), row=4, col=1)
+            fig.update_layout(height=700, hovermode="x unified")
+            chart(fig, show_legend=False, key="kracht_herstel")
+
+    # -------------------------------------------------------------- beheer --
+    with kracht_beheer_tab:
+        st.markdown("#### Oefeningen")
+        actieve_ex = kracht_catalog.load_exercises(conn, only_active=True)
+        if not actieve_ex.empty:
+            bewerkt_ex = st.data_editor(
+                actieve_ex[["id", "name", "load_type", "per_side", "search_term", "cue"]],
+                num_rows="fixed", hide_index=True, width="stretch", key="kracht_ex_editor",
+                column_config={
+                    "id": st.column_config.NumberColumn("ID", disabled=True),
+                    "name": st.column_config.TextColumn("Naam", required=True),
+                    "load_type": st.column_config.SelectboxColumn(
+                        "Type", options=list(kracht_catalog.LOAD_TYPES)),
+                    "per_side": st.column_config.CheckboxColumn("Per kant"),
+                    "search_term": st.column_config.TextColumn("Zoekterm"),
+                    "cue": st.column_config.TextColumn("Cue"),
+                },
+            )
+            if st.button("💾 Oefeningen opslaan", key="kracht_ex_opslaan"):
+                for _, r in bewerkt_ex.iterrows():
+                    kracht_catalog.update_exercise(
+                        conn, int(r["id"]), name=r["name"], load_type=r["load_type"],
+                        per_side=int(bool(r["per_side"])), search_term=r["search_term"] or "",
+                        cue=r["cue"] or "")
+                st.success("Opgeslagen.")
+                st.rerun()
+
+        with st.expander("➕ Nieuwe oefening"):
+            with st.form("kracht_nieuwe_oefening"):
+                n1, n2 = st.columns(2)
+                naam_nw = n1.text_input("Naam")
+                type_nw = n2.selectbox("Type", list(kracht_catalog.LOAD_TYPES))
+                n3, n4 = st.columns(2)
+                side_nw = n3.checkbox("Per kant")
+                zoek_nw = n4.text_input("Zoekterm")
+                cue_nw = st.text_input("Cue")
+                if st.form_submit_button("➕ Toevoegen") and naam_nw.strip():
+                    kracht_catalog.add_exercise(conn, naam_nw, type_nw, side_nw, zoek_nw, cue_nw)
+                    st.rerun()
+
+        if not actieve_ex.empty:
+            with st.expander("🗑️ Oefening deactiveren"):
+                st.caption("Historie (gelogde sets, grafieken) blijft volledig bewaard.")
+                deact_id = st.selectbox(
+                    "Oefening", list(actieve_ex["id"]),
+                    format_func=lambda i: actieve_ex.set_index("id").loc[i, "name"],
+                    key="kracht_deact_ex_keuze")
+                if st.button("Deactiveren", key="kracht_deact_ex_knop"):
+                    kracht_catalog.set_exercise_active(conn, int(deact_id), False)
+                    st.rerun()
+
+        inactieve_ex = kracht_catalog.load_exercises(conn)
+        inactieve_ex = inactieve_ex[inactieve_ex["is_active"] == 0]
+        if not inactieve_ex.empty:
+            with st.expander(f"Gedeactiveerde oefeningen ({len(inactieve_ex)})"):
+                for _, r in inactieve_ex.iterrows():
+                    ic1, ic2 = st.columns([4, 1])
+                    ic1.write(r["name"])
+                    if ic2.button("Heractiveren", key=f"kracht_react_ex_{r['id']}"):
+                        kracht_catalog.set_exercise_active(conn, int(r["id"]), True)
+                        st.rerun()
+
+        st.divider()
+        st.markdown("#### Sjablonen")
+        actieve_tpl = kracht_catalog.load_templates(conn, only_active=True)
+        if not actieve_tpl.empty:
+            bewerkt_tpl = st.data_editor(
+                actieve_tpl[["id", "code", "name", "sort_order"]],
+                num_rows="fixed", hide_index=True, width="stretch", key="kracht_tpl_editor",
+                column_config={"id": st.column_config.NumberColumn("ID", disabled=True)},
+            )
+            if st.button("💾 Sjablonen opslaan", key="kracht_tpl_opslaan"):
+                for _, r in bewerkt_tpl.iterrows():
+                    kracht_catalog.update_template(
+                        conn, int(r["id"]), code=r["code"], name=r["name"],
+                        sort_order=int(r["sort_order"]))
+                st.success("Opgeslagen.")
+                st.rerun()
+
+        with st.expander("➕ Nieuw sjabloon"):
+            with st.form("kracht_nieuw_sjabloon"):
+                t1, t2 = st.columns(2)
+                code_nw = t1.text_input("Code (bijv. C)")
+                naam_tpl_nw = t2.text_input("Naam")
+                if st.form_submit_button("➕ Toevoegen") and code_nw.strip():
+                    kracht_catalog.add_template(conn, code_nw, naam_tpl_nw)
+                    st.rerun()
+
+        if not actieve_tpl.empty:
+            with st.expander("🗑️ Sjabloon deactiveren"):
+                deact_tid = st.selectbox(
+                    "Sjabloon", list(actieve_tpl["id"]),
+                    format_func=lambda i: actieve_tpl.set_index("id").loc[i, "name"],
+                    key="kracht_deact_tpl_keuze")
+                if st.button("Deactiveren", key="kracht_deact_tpl_knop"):
+                    kracht_catalog.set_template_active(conn, int(deact_tid), False)
+                    st.rerun()
+
+        st.divider()
+        st.markdown("#### Sjabloon-items")
+        if actieve_tpl.empty:
+            st.info("Voeg eerst een sjabloon toe.")
+        else:
+            tpl_keuze = st.selectbox(
+                "Sjabloon", list(actieve_tpl["id"]),
+                format_func=lambda i: actieve_tpl.set_index("id").loc[i, "name"],
+                key="kracht_items_tpl_keuze")
+            items_actief = kracht_catalog.load_template_items(conn, int(tpl_keuze), only_active=True)
+            if not items_actief.empty:
+                bewerkt_items = st.data_editor(
+                    items_actief[["id", "exercise_name", "sort_order",
+                                  "target_sets_p1", "target_reps_p1",
+                                  "target_sets_p2", "target_reps_p2",
+                                  "target_sets_p3", "target_reps_p3"]],
+                    num_rows="fixed", hide_index=True, width="stretch", key="kracht_items_editor",
+                    column_config={
+                        "id": st.column_config.NumberColumn("ID", disabled=True),
+                        "exercise_name": st.column_config.TextColumn("Oefening", disabled=True),
+                    },
+                )
+                if st.button("💾 Items opslaan", key="kracht_items_opslaan"):
+                    for _, r in bewerkt_items.iterrows():
+                        kracht_catalog.update_template_item(
+                            conn, int(r["id"]), sort_order=int(r["sort_order"]),
+                            target_sets_p1=r["target_sets_p1"], target_reps_p1=r["target_reps_p1"],
+                            target_sets_p2=r["target_sets_p2"], target_reps_p2=r["target_reps_p2"],
+                            target_sets_p3=r["target_sets_p3"], target_reps_p3=r["target_reps_p3"])
+                    st.success("Opgeslagen.")
+                    st.rerun()
+
+            with st.expander("➕ Oefening aan dit sjabloon toevoegen"):
+                alle_actieve_ex = kracht_catalog.load_exercises(conn, only_active=True)
+                if alle_actieve_ex.empty:
+                    st.caption("Geen actieve oefeningen beschikbaar.")
+                else:
+                    with st.form("kracht_item_toevoegen"):
+                        ex_id_nw = st.selectbox(
+                            "Oefening", list(alle_actieve_ex["id"]),
+                            format_func=lambda i: alle_actieve_ex.set_index("id").loc[i, "name"],
+                            key="kracht_item_ex_keuze")
+                        i1, i2, i3 = st.columns(3)
+                        s1 = i1.number_input("Sets fase 1", min_value=0, step=1, value=3)
+                        r1 = i1.text_input("Reps fase 1", value="8")
+                        s2 = i2.number_input("Sets fase 2", min_value=0, step=1, value=3)
+                        r2 = i2.text_input("Reps fase 2", value="8")
+                        s3 = i3.number_input("Sets fase 3", min_value=0, step=1, value=3)
+                        r3 = i3.text_input("Reps fase 3", value="8")
+                        if st.form_submit_button("➕ Toevoegen"):
+                            kracht_catalog.add_template_item(
+                                conn, int(tpl_keuze), int(ex_id_nw),
+                                {"target_sets_p1": s1, "target_reps_p1": r1,
+                                 "target_sets_p2": s2, "target_reps_p2": r2,
+                                 "target_sets_p3": s3, "target_reps_p3": r3})
+                            st.rerun()
+
+            if not items_actief.empty:
+                with st.expander("🗑️ Item deactiveren"):
+                    deact_item = st.selectbox(
+                        "Item", list(items_actief["id"]),
+                        format_func=lambda i: items_actief.set_index("id").loc[i, "exercise_name"],
+                        key="kracht_deact_item_keuze")
+                    if st.button("Deactiveren", key="kracht_deact_item_knop"):
+                        kracht_catalog.set_template_item_active(conn, int(deact_item), False)
+                        st.rerun()
+
+
+# --------------------------------------------------------------------- core --
+with tab_core:
+    st.subheader("🧘 Core & mobiliteit")
+    vandaag_tab, historie_core_tab, statistiek_tab = st.tabs(
+        ["✅ Vandaag", "📅 Historie", "📊 Statistiek"])
+
+    # ------------------------------------------------------------- vandaag --
+    with vandaag_tab:
+        log_datum = st.date_input(
+            "Datum", value=date.today(),
+            min_value=date.today() - timedelta(days=coretraining.MAX_BACKFILL_DAYS),
+            max_value=date.today(), key="core_datum")
+
+        stats = coretraining.streak_stats(conn)
+        if log_datum == date.today() and stats["never_twice"]:
+            st.warning(stats["never_twice"])
+
+        actieve_core_ex = coretraining.load_core_exercises(conn, only_active=True)
+        gelogd_op_datum = coretraining.logs_for_period(conn, log_datum, log_datum)
+        gelogde_ids = (set(gelogd_op_datum["exercise_id"])
+                       if not gelogd_op_datum.empty else set())
+
+        quick_ex = actieve_core_ex[actieve_core_ex["is_quick_day"] == 1]
+        if not quick_ex.empty:
+            if st.button("⚡ Korte dag (log alle korte-dag-oefeningen in één keer)",
+                        key="core_korte_dag"):
+                gelogd = coretraining.log_korte_dag(conn, log_datum)
+                if gelogd:
+                    st.toast(f"Gelogd: {', '.join(gelogd)}.")
+                else:
+                    st.warning("Geen enkele oefening is gemarkeerd als 'korte dag'.")
+                st.rerun()
+
+        for categorie in coretraining.CATEGORIES:
+            subset = actieve_core_ex[actieve_core_ex["category"] == categorie]
+            if subset.empty:
+                continue
+            st.markdown(f"**{categorie.capitalize()}**")
+            for _, ex in subset.iterrows():
+                eid = int(ex["id"])
+                aangevinkt = eid in gelogde_ids
+                nieuw = st.checkbox(
+                    ex["name"] + (f" — _{ex['dosage']}_" if ex["dosage"] else ""),
+                    value=aangevinkt, key=f"core_check_{eid}_{log_datum.isoformat()}")
+                if nieuw and not aangevinkt:
+                    coretraining.log_exercise(conn, eid, log_datum)
+                    st.rerun()
+                elif not nieuw and aangevinkt:
+                    coretraining.unlog_exercise(conn, eid, log_datum)
+                    st.rerun()
+
+        if not actieve_core_ex.empty:
+            volledig = streak_mod.is_volledige_dag(coretraining.day_counts(conn), log_datum)
+            st.caption(
+                f"{len(gelogde_ids)} van {len(actieve_core_ex)} oefeningen gelogd op "
+                f"{log_datum:%d-%m-%Y}" + (" — volledige dag! 🎉" if volledig else ""))
+
+        verwaarloosde = coretraining.verwaarloosd(conn)
+        if verwaarloosde:
+            st.caption("💤 Een tijd niet gedaan: " + ", ".join(
+                f"{v['name']} ({v['dagen']} dagen)" if v["dagen"] is not None
+                else f"{v['name']} (nog nooit)" for v in verwaarloosde))
+
+        with st.expander("⚙️ Oefeningen beheren"):
+            alle_core_ex = coretraining.load_core_exercises(conn, only_active=True)
+            if not alle_core_ex.empty:
+                bewerkt_core = st.data_editor(
+                    alle_core_ex[["id", "name", "category", "dosage", "search_term",
+                                  "is_quick_day"]],
+                    num_rows="fixed", hide_index=True, width="stretch", key="core_ex_editor",
+                    column_config={
+                        "id": st.column_config.NumberColumn("ID", disabled=True),
+                        "name": st.column_config.TextColumn("Naam", required=True),
+                        "category": st.column_config.SelectboxColumn(
+                            "Categorie", options=list(coretraining.CATEGORIES)),
+                        "dosage": st.column_config.TextColumn("Dosering"),
+                        "search_term": st.column_config.TextColumn("Zoekterm"),
+                        "is_quick_day": st.column_config.CheckboxColumn("Korte dag"),
+                    },
+                )
+                if st.button("💾 Oefeningen opslaan", key="core_ex_opslaan"):
+                    for _, r in bewerkt_core.iterrows():
+                        coretraining.update_core_exercise(
+                            conn, int(r["id"]), name=r["name"], category=r["category"],
+                            dosage=r["dosage"] or "", search_term=r["search_term"] or "",
+                            is_quick_day=bool(r["is_quick_day"]))
+                    st.success("Opgeslagen.")
+                    st.rerun()
+
+            with st.form("core_nieuwe_oefening"):
+                cn1, cn2 = st.columns(2)
+                core_naam_nw = cn1.text_input("Naam")
+                core_cat_nw = cn2.selectbox("Categorie", list(coretraining.CATEGORIES))
+                cn3, cn4 = st.columns(2)
+                core_dos_nw = cn3.text_input("Dosering")
+                core_zoek_nw = cn4.text_input("Zoekterm")
+                core_quick_nw = st.checkbox("Korte dag")
+                if st.form_submit_button("➕ Toevoegen") and core_naam_nw.strip():
+                    coretraining.add_core_exercise(
+                        conn, core_naam_nw, core_cat_nw, core_dos_nw, core_zoek_nw,
+                        is_quick_day=core_quick_nw)
+                    st.rerun()
+
+            if not alle_core_ex.empty:
+                deact_core_id = st.selectbox(
+                    "Deactiveren", list(alle_core_ex["id"]),
+                    format_func=lambda i: alle_core_ex.set_index("id").loc[i, "name"],
+                    key="core_deact_keuze")
+                if st.button("Deactiveren", key="core_deact_knop"):
+                    coretraining.set_core_exercise_active(conn, int(deact_core_id), False)
+                    st.rerun()
+
+            inactieve_core = coretraining.load_core_exercises(conn)
+            inactieve_core = inactieve_core[inactieve_core["is_active"] == 0]
+            if not inactieve_core.empty:
+                st.caption(f"Gedeactiveerd ({len(inactieve_core)}):")
+                for _, r in inactieve_core.iterrows():
+                    dc1, dc2 = st.columns([4, 1])
+                    dc1.write(r["name"])
+                    if dc2.button("Heractiveren", key=f"core_react_{r['id']}"):
+                        coretraining.set_core_exercise_active(conn, int(r["id"]), True)
+                        st.rerun()
+
+    # ------------------------------------------------------------ historie --
+    with historie_core_tab:
+        einde = date.today()
+        begin = einde - timedelta(days=13)
+        periode = coretraining.logs_for_period(conn, begin, einde)
+        alle_core = coretraining.load_core_exercises(conn, only_active=False)
+        if alle_core.empty:
+            st.info("Nog geen oefeningen.")
+        else:
+            dagen = [begin + timedelta(days=i) for i in range(14)]
+            kolomlabels = [d.strftime("%d-%m") for d in dagen]
+            rijlabels = [r["name"] + ("" if r["is_active"] else " (inactief)")
+                        for _, r in alle_core.sort_values("sort_order").iterrows()]
+            rooster = pd.DataFrame("", index=rijlabels, columns=kolomlabels)
+            id_naar_label = {int(r["id"]): r["name"] + ("" if r["is_active"] else " (inactief)")
+                             for _, r in alle_core.iterrows()}
+            if not periode.empty:
+                for _, r in periode.iterrows():
+                    label = id_naar_label.get(int(r["exercise_id"]))
+                    d = date.fromisoformat(r["log_date"])
+                    if label and d in dagen:
+                        rooster.loc[label, d.strftime("%d-%m")] = "✅"
+            st.dataframe(rooster, width="stretch")
+            st.caption("Laatste 14 dagen — ✅ = gelogd.")
+
+    # ---------------------------------------------------------- statistiek --
+    with statistiek_tab:
+        stats = coretraining.streak_stats(conn)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Huidige streak", f"{stats['current']} dagen")
+        c2.metric("Langste streak", f"{stats['longest']} dagen")
+        c3.metric("Consistentie (30d)", f"{stats['consistency_30d']:.0f}%")
+        c4.metric("Freezes over deze maand", stats["freezes_left"])
+        if stats["milestone"]:
+            st.success(f"🏆 Mijlpaal bereikt: {stats['milestone']} dagen op rij!")
+        if stats["never_twice"]:
+            st.warning(stats["never_twice"])
+
+        compleet = coretraining.complete_days(conn)
+        bevroren = coretraining.frozen_days(conn)
+        if not compleet and not bevroren:
+            st.info("Nog geen historie.")
+        else:
+            einde = date.today()
+            begin = max(min(compleet | bevroren), einde - timedelta(days=180))
+            z, x_labels, y_labels, hover = streak_mod.heatmap_matrix(
+                compleet, bevroren, begin, einde)
+            colorscale = [
+                [0.0, "#e5e5e5"], [0.33, "#e5e5e5"],
+                [0.34, PAL["zones"][1]], [0.66, PAL["zones"][1]],
+                [0.67, PAL["cats"][0]], [1.0, PAL["cats"][0]],
+            ]
+            fig = go.Figure(go.Heatmap(
+                z=z, x=x_labels, y=y_labels, text=hover, hoverinfo="text",
+                colorscale=colorscale, zmin=0, zmax=2, showscale=False,
+                xgap=2, ygap=2))
+            fig.update_layout(title="Kalender — groen = gedaan, blauw = freeze", height=260)
+            chart(fig, show_legend=False, key="core_heatmap")
+
 # ----------------------------------------------------------------- lichaam --
 with tab_lichaam:
     st.subheader("🧍 Lichaamssamenstelling")
@@ -3169,367 +3795,6 @@ with tab_herstel:
                 fig.update_layout(hovermode="x unified")
                 chart(fig, key="herstel_kruising")
 
-# ----------------------------------------------------------------- voeding --
-# Voedingsplanner: invoeren wat je gaat doen, terugkrijgen wat je wanneer neemt.
-# Het rekenwerk zit volledig in tricoach.nutrition (deterministisch, testbaar);
-# hier staat alleen de UI. Het taalmodel mag hooguit een korte toelichting
-# schrijven bij een al berekend plan — nooit de cijfers zelf.
-with tab_voeding:
-    st.subheader("🥤 Voedingsplan voor training of race")
-    st.caption(voeding_regels.DISCLAIMER)
-
-    laatste_gewicht = None
-    metingen = body.load_measurements(conn)
-    if not metingen.empty and metingen["weight_kg"].notna().any():
-        laatste_gewicht = float(metingen["weight_kg"].dropna().iloc[-1])
-
-    alle_producten = voeding_producten.load_products(conn)
-
-    plan_tab, product_tab, historie_tab = st.tabs(
-        ["📝 Plan maken", "📦 Producten", "📚 Opgeslagen plannen"])
-
-    # ------------------------------------------------------------ plan maken --
-    with plan_tab:
-        c1, c2, c3 = st.columns([2, 2, 2])
-        sessietype = c1.selectbox(
-            "Sport", list(SESSION_TYPES),
-            format_func=lambda k: SESSION_TYPES[k][0],
-            index=1, key="voeding_type",
-        )
-        intensiteit = c2.selectbox(
-            "Intensiteit", list(INTENSITY_LABEL),
-            format_func=lambda k: INTENSITY_LABEL[k], key="voeding_intensiteit",
-        )
-        plandatum = c3.date_input(
-            "Datum van de sessie", value=date.today(), key="voeding_datum",
-            help="Bepaalt welke weersverwachting wordt opgehaald.",
-        )
-
-        st.markdown("**Onderdelen** — vul per onderdeel een afstand óf een duur in.")
-        per_sport: dict[str, tuple[float | None, float | None]] = {}
-        posten: list[AidStation] = []
-        for i, sport in enumerate(legs_for(sessietype)):
-            k1, k2, k3 = st.columns([1, 2, 2])
-            k1.markdown(f"<div style='padding-top:2rem'>{sport_label(sport)}</div>",
-                        unsafe_allow_html=True)
-            basis = k2.radio(
-                "Invoer", ["Afstand", "Duur"], horizontal=True,
-                key=f"voeding_basis_{sport}", label_visibility="collapsed",
-            )
-            if basis == "Afstand":
-                eenheid = "m" if sport == "swimming" else "km"
-                standaard = {"swimming": 1900.0, "cycling": 90.0, "running": 21.1}[sport]
-                waarde = k3.number_input(
-                    f"Afstand ({eenheid})", min_value=0.0, value=standaard,
-                    step=1.0 if sport == "swimming" else 0.1,
-                    key=f"voeding_afstand_{sport}",
-                )
-                meters = waarde if sport == "swimming" else waarde * 1000
-                per_sport[sport] = (meters, None)
-            else:
-                minuten = k3.number_input(
-                    "Duur (minuten)", min_value=0.0, value=180.0, step=5.0,
-                    key=f"voeding_duur_{sport}",
-                )
-                per_sport[sport] = (None, minuten * 60)
-
-            if sport != "swimming":
-                ruw = st.text_input(
-                    f"Verzorgingsposten op de {sport_label(sport).lower()} "
-                    f"(km, komma-gescheiden)",
-                    key=f"voeding_posten_{sport}", placeholder="bijv. 30, 60",
-                    help="Waar je kunt bijvullen; dan hoeft niet alles mee.",
-                )
-                for stuk in ruw.replace(";", ",").split(","):
-                    try:
-                        posten.append(AidStation(leg_index=i, km=float(stuk.strip())))
-                    except ValueError:
-                        continue
-
-        # Temperatuur: standaard uit de verwachting van Open-Meteo voor de
-        # geplande dag (thuislocatie uit de privacyzone), handmatig aanpasbaar.
-        t1, t2 = st.columns([2, 3])
-        thuis = heatmap_mod.privacy_settings(config)
-        verwacht = (cache_verwachte_temperatuur(thuis["lat"], thuis["lon"], plandatum)
-                    if thuis.get("lat") and thuis.get("lon") else None)
-        temp = t1.number_input(
-            "Verwachte temperatuur (°C)",
-            value=float(verwacht if verwacht is not None
-                        else voeding_regels.DEFAULT_TEMP_C),
-            step=0.5, key=f"voeding_temp_{plandatum.isoformat()}",
-        )
-        t2.caption(
-            f"Verwachting Open-Meteo voor {plandatum:%d-%m-%Y}: **{verwacht:.1f} °C** "
-            f"— aanpasbaar." if verwacht is not None else
-            "Geen verwachting beschikbaar (te ver vooruit, geen thuislocatie of "
-            "geen internet) — vul de temperatuur zelf in."
-        )
-
-        st.markdown("**Beschikbare producten** — vink aan wat je bij je hebt.")
-        gekozen_namen = []
-        kolommen = st.columns(2)
-        for i, product in enumerate([p for p in alle_producten if p.active]):
-            label = (f"{product.name} — {product.carbs_g:.0f} g"
-                     + (" · dual-source" if product.effective_source ==
-                        voeding_producten.SOURCE_DUAL else " · single-source")
-                     + (f" · {product.caffeine_mg:.0f} mg cafeïne"
-                        if product.caffeine_mg else ""))
-            if kolommen[i % 2].checkbox(label, key=f"voeding_p_{product.name}"):
-                gekozen_namen.append(product.name)
-        selectie = [p for p in alle_producten if p.name in gekozen_namen]
-
-        with st.expander("Fijnafstelling (doel, gewicht, duur overschrijven)"):
-            f1, f2 = st.columns(2)
-            eigen_doel = f1.checkbox("Zelf een doel in g/uur kiezen",
-                                     key="voeding_eigen_doel")
-            doel_g_h = f1.number_input(
-                "Koolhydraten (g/uur)", min_value=0.0, max_value=150.0,
-                value=60.0, step=5.0, disabled=not eigen_doel,
-                key="voeding_doel_waarde",
-            )
-            getrainde_darm = f1.checkbox(
-                "Getrainde darm (tot 120 g/uur toestaan)",
-                key="voeding_darm",
-                help="Alleen aanzetten als hogere innames in training "
-                     "aantoonbaar goed vielen — zie de tolerantiegeschiedenis.",
-            )
-            gewicht = f2.number_input(
-                "Lichaamsgewicht (kg, voor het cafeïneplafond)",
-                min_value=0.0, value=float(laatste_gewicht or 0.0), step=0.5,
-                key="voeding_gewicht",
-                help="Standaard je laatste meting op de Lichaam-tab.",
-            )
-            eigen_duur = f2.checkbox("Duurschatting overschrijven",
-                                     key="voeding_eigen_duur")
-            duur_min = f2.number_input(
-                "Totale duur (minuten)", min_value=0.0, value=180.0, step=5.0,
-                disabled=not eigen_duur, key="voeding_duur_waarde",
-            )
-            bidon_ml = f2.number_input(
-                "Bidongrootte (ml)", min_value=50.0,
-                value=float(voeding_regels.BOTTLE_ML), step=50.0,
-                key="voeding_bidon_ml",
-                help="Bepaalt hoeveel bidons de meeneemlijst adviseert.",
-            )
-
-        if st.button("🧮 Bereken plan", type="primary", key="voeding_bereken"):
-            legs = [LegRequest(sport=s, distance_m=per_sport[s][0],
-                               duration_s=per_sport[s][1])
-                    for s in legs_for(sessietype)]
-            with st.spinner("Duur schatten uit je eigen sessies..."):
-                schatting = estimate_duration(
-                    conn, trainingen, config["athlete"], legs, intensiteit, temp)
-            verzoek = PlanRequest(
-                session_type=sessietype, legs=legs, intensity=intensiteit,
-                temp_c=temp, product_names=gekozen_namen, aid_stations=posten,
-                weight_kg=gewicht or None,
-                target_g_h=doel_g_h if eigen_doel else None,
-                trained_gut=getrainde_darm,
-                bottle_ml=bidon_ml,
-                override_duration_s=duur_min * 60 if eigen_duur else None,
-                planned_date=plandatum,
-                name=f"{SESSION_TYPES[sessietype][0]} {plandatum:%d-%m-%Y}",
-            )
-            st.session_state["voeding_plan"] = build_plan(verzoek, selectie, schatting)
-            st.session_state.pop("voeding_toelichting", None)
-
-        plan = st.session_state.get("voeding_plan")
-        if plan is None:
-            st.info("Vul hierboven je sessie in en klik op **Bereken plan**.")
-        else:
-            st.divider()
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Geschatte duur", plan.duration.range_text(),
-                      help="Uit je eigen sessies; zie de onderbouwing hieronder.")
-            m2.metric("Koolhydraten", f"{plan.totals['carbs_g']:.0f} g",
-                      f"{plan.totals['carbs_per_hour']:.0f} g/uur")
-            m3.metric("Vocht", f"{plan.totals['fluid_ml']:.0f} ml",
-                      f"{plan.totals['fluid_ml_per_hour']:.0f} ml/uur")
-            m4.metric("Natrium", f"{plan.totals['sodium_mg']:.0f} mg",
-                      f"{plan.totals['caffeine_mg']:.0f} mg cafeïne"
-                      if plan.totals["caffeine_mg"] else None)
-
-            # Het plafond hangt aan de productselectie; zonder selectie is er
-            # niets om een plafond van af te leiden en zou het getal suggereren
-            # dat er al iets gekozen is.
-            plafond = (f" · opnameplafond van je selectie: "
-                       f"**{plan.cap_g_h:.0f} g/uur**"
-                       if plan.request.product_names else
-                       " · nog geen producten aangevinkt")
-            st.caption(
-                f"Richtlijn: **{plan.target.as_text()}** · plan: "
-                f"**{plan.planned_g_h:.0f} g/uur** over de eetbare tijd "
-                f"({fmt_duration(plan.feedable_s)}){plafond}."
-            )
-            for been in plan.duration.legs:
-                st.caption(f"↳ {been.label}: **{been.range_text()}** — {been.basis}")
-
-            for melding in plan.warnings:
-                (st.warning if melding.severity == SEVERITY_WARNING else st.info)(
-                    melding.text)
-
-            if plan.events:
-                st.markdown("#### ⏱️ Tijdlijn")
-                tijdlijn = pd.DataFrame([{
-                    "Moment": e.time_label,
-                    "Onderdeel": e.segment,
-                    "Km": f"{e.km:.1f}" if e.km is not None else GEEN_WAARDE,
-                    "Wat": f"{e.amount} {e.product}",
-                    "Koolhydraten": f"{e.carbs_g:.0f} g",
-                    "Totaal tot hier": f"{e.cumulative_carbs_g:.0f} g",
-                    "Opmerking": e.note,
-                } for e in plan.events])
-                st.dataframe(tijdlijn, hide_index=True, width="stretch")
-            if plan.drink.carbs_g or plan.drink.fluid_ml:
-                st.caption(
-                    f"Drinken loopt continu door: ~"
-                    f"{plan.drink.ml_per_hour / 4:.0f} ml elke 15 minuten "
-                    f"({plan.drink.ml_per_hour:.0f} ml/uur). Het lopende totaal "
-                    f"hierboven telt de drank naar rato mee."
-                )
-
-            if plan.carry:
-                st.markdown("#### 🎒 Meenemen")
-                st.dataframe(pd.DataFrame([{
-                    "Wat": c.label, "Hoeveel": c.amount, "Toelichting": c.detail,
-                } for c in plan.carry]), hide_index=True, width="stretch")
-
-            st.markdown("#### 💾 Bewaren bij een geplande sessie")
-            b1, b2 = st.columns([3, 1])
-            plannaam = b1.text_input("Naam", value=plan.request.name,
-                                     key="voeding_plannaam")
-            if b2.button("💾 Plan opslaan", key="voeding_opslaan"):
-                voeding_opslag.save_plan(conn, plan, plannaam, plandatum)
-                st.success(f"Plan '{plannaam}' opgeslagen — vul na afloop op de "
-                           f"tab **Opgeslagen plannen** in hoe het viel.")
-
-            st.caption(
-                "De toelichting is het enige wat een taalmodel hier schrijft; "
-                "alle cijfers hierboven zijn door het algoritme berekend."
-            )
-            if st.button("💬 Korte toelichting vragen", key="voeding_toelicht"):
-                try:
-                    with st.spinner("Toelichting schrijven..."):
-                        st.session_state["voeding_toelichting"] = explain_plan(
-                            router, plan)
-                except Exception as e:
-                    st.error(f"Toelichting mislukt: {e}")
-            if toelichting := st.session_state.get("voeding_toelichting"):
-                st.info(toelichting)
-
-    # -------------------------------------------------------------- producten --
-    with product_tab:
-        st.caption(
-            "Waarden per eenheid (één gel, één schepje/sachet, één portie), van "
-            "de verpakking — controleer ze bij een nieuwe batch, recepturen "
-            "veranderen. **Bron** bepaalt het opnameplafond: `single` = "
-            "glucose/maltodextrine (~60 g/uur), `dual` = glucose + fructose "
-            "(~90 g/uur), `onbekend` = meerdere suikers zonder ratio en telt "
-            "conservatief als single."
-        )
-        bewerkt = st.data_editor(
-            voeding_producten.products_dataframe(alle_producten),
-            num_rows="dynamic", hide_index=True, width="stretch",
-            key="voeding_producteditor",
-            column_config={
-                "name": st.column_config.TextColumn("Product", required=True),
-                "kind": st.column_config.SelectboxColumn(
-                    "Type", options=list(voeding_producten.KINDS)),
-                "carbs_g": st.column_config.NumberColumn(
-                    "Koolhydraten (g)", min_value=0.0, step=1.0),
-                "source": st.column_config.SelectboxColumn(
-                    "Bron", options=list(voeding_producten.SOURCES)),
-                "ratio": st.column_config.TextColumn("Ratio / samenstelling"),
-                "sodium_mg": st.column_config.NumberColumn(
-                    "Natrium (mg)", min_value=0.0, step=1.0),
-                "caffeine_mg": st.column_config.NumberColumn(
-                    "Cafeïne (mg)", min_value=0.0, step=5.0),
-                "serving_ml": st.column_config.NumberColumn("Volume (ml)"),
-                "serving_g": st.column_config.NumberColumn("Portie (g)"),
-                "note": st.column_config.TextColumn("Opmerking"),
-                "active": st.column_config.CheckboxColumn("In voorraad"),
-            },
-        )
-        p1, p2 = st.columns([1, 4])
-        if p1.button("💾 Producten opslaan", key="voeding_prod_opslaan"):
-            n = voeding_producten.save_products(
-                conn, voeding_producten.products_from_dataframe(bewerkt))
-            st.success(f"{n} producten opgeslagen.")
-            st.rerun()
-        if p2.button("↩️ Terug naar de standaardlijst", key="voeding_prod_reset"):
-            voeding_producten.reset_products(conn)
-            st.rerun()
-
-    # ------------------------------------------------------ opgeslagen plannen --
-    with historie_tab:
-        tolerantie = voeding_opslag.tolerance_summary(conn)
-        if tolerantie:
-            st.markdown("#### 🧪 Wat mijn maag aankan")
-            for regel in tolerantie:
-                st.markdown(f"- {regel}")
-            st.caption(
-                "Dit zijn je eigen cijfers en die wegen zwaarder dan een "
-                "algemene richtlijn — ze gaan over jouw darm."
-            )
-            geschiedenis = voeding_opslag.tolerance_history(conn)
-            if len(geschiedenis) >= 2 and geschiedenis["g_per_uur"].notna().any():
-                fig = px.scatter(
-                    geschiedenis.dropna(subset=["g_per_uur"]),
-                    x="datum", y="g_per_uur", color="gut",
-                    labels={"datum": "", "g_per_uur": "g/uur", "gut": "Maag"},
-                    # Groen/oranje/rood uit de zonereeks: goed → klachten.
-                    color_discrete_map={
-                        voeding_opslag.GUT_GOOD: PAL["zones"][1],
-                        voeding_opslag.GUT_MILD: PAL["zones"][2],
-                        voeding_opslag.GUT_BAD: PAL["zones"][4],
-                    },
-                )
-                chart(style_fig(fig), key="voeding_tolerantie")
-            st.divider()
-
-        plannen = voeding_opslag.load_plans(conn)
-        if plannen.empty:
-            st.info("Nog geen plannen opgeslagen.")
-        else:
-            for _, rij in plannen.iterrows():
-                ingevuld = pd.notna(rij["gut"])
-                kop = (f"{'✅' if ingevuld else '📝'} {rij['name']}"
-                       + (f" — {rij['planned_date']}" if rij["planned_date"] else ""))
-                with st.expander(kop, expanded=not ingevuld):
-                    st.code(rij["summary"] or "", language=None)
-                    if ingevuld:
-                        st.markdown(
-                            f"**Achteraf:** {voeding_opslag.GUT_ICON.get(rij['gut'], '')} "
-                            f"{rij['gut']} — {rij['actual_carbs_g']:.0f} g in "
-                            f"{fmt_duration(rij['actual_duration_s'])}"
-                            + (f" · _{rij['note']}_" if rij["note"] else "")
-                        )
-                    with st.form(f"voeding_fb_{rij['plan_id']}"):
-                        st.markdown("**Hoe ging het?**")
-                        v1, v2, v3 = st.columns(3)
-                        werkelijk = v1.number_input(
-                            "Werkelijk ingenomen (g koolhydraten)", min_value=0.0,
-                            value=float(rij["actual_carbs_g"] or 0), step=5.0)
-                        werkelijke_duur = v2.number_input(
-                            "Werkelijke duur (minuten)", min_value=0.0,
-                            value=float((rij["actual_duration_s"] or 0) / 60),
-                            step=5.0)
-                        maag = v3.selectbox(
-                            "Maag", list(voeding_opslag.GUT_OPTIONS),
-                            index=(list(voeding_opslag.GUT_OPTIONS).index(rij["gut"])
-                                   if ingevuld else 0))
-                        notitie = st.text_input("Notitie", value=rij["note"] or "")
-                        opslaan, verwijderen = st.columns([1, 1])
-                        if opslaan.form_submit_button("💾 Opslaan"):
-                            voeding_opslag.save_feedback(
-                                conn, int(rij["plan_id"]), werkelijk,
-                                werkelijke_duur * 60, maag, notitie)
-                            st.rerun()
-                        if verwijderen.form_submit_button("🗑️ Plan verwijderen"):
-                            voeding_opslag.delete_plan(conn, int(rij["plan_id"]))
-                            st.rerun()
-
-
 # ------------------------------------------------------------------- coach --
 with tab_coach:
     st.subheader("📅 Weekschema")
@@ -3912,7 +4177,7 @@ with tab_settings:
     )
     st.caption(
         "De racevoorspelling en gereedheid op de voortgang-tab rekenen met de "
-        "meterafstanden van de eerste race; lege velden vallen terug op de "
+        "meterafstanden van de eerstvolgende race; lege velden vallen terug op de "
         "standaardafstand (1,5 / 40 / 10 km)."
     )
 
@@ -3924,6 +4189,15 @@ with tab_settings:
     new_session_time = c2.text_input(
         "Beschikbare tijd per sessie", str(config["athlete"].get("session_time", "")),
         help="Bijv.: 30-45 min doordeweeks, 1,5-2 uur zondag.")
+
+    st.subheader("🏋️ Krachtfase")
+    fase_opties = {1: "Fase 1 — opbouw", 2: "Fase 2 — kracht", 3: "Fase 3 — piek"}
+    huidige_fase = kracht_regels.current_phase(config)
+    new_phase = st.radio(
+        "Bepaalt de doelsets/reps in de Kracht-tab", list(fase_opties),
+        format_func=lambda f: fase_opties[f],
+        index=list(fase_opties).index(huidige_fase), horizontal=True,
+        key="settings_kracht_fase")
 
     st.subheader("🎯 Drempels per sport")
     st.caption(
@@ -4109,6 +4383,7 @@ with tab_settings:
         new_config["athlete"]["training_days"] = new_training_days.strip()
         new_config["athlete"]["session_time"] = new_session_time.strip()
         new_config["athlete"].pop("zone_bounds", None)  # zones komen nu uit %LTHR
+        new_config.setdefault("training", {})["phase"] = int(new_phase)
         new_config["llm"]["ollama"]["host"] = new_host.strip().rstrip("/")
         new_config["llm"]["ollama"]["model"] = new_ollama_model.strip()
         new_config["llm"]["anthropic"]["model"] = new_anthropic_model.strip()
