@@ -4137,6 +4137,8 @@ with tab_log:
 with tab_settings:
     if flash := st.session_state.pop("settings_flash", None):
         st.success(flash)
+    if flash_warning := st.session_state.pop("settings_flash_warning", None):
+        st.warning(flash_warning)
 
     st.caption(
         "Je profielwaarden hieronder dienen als context voor ál het advies en de "
@@ -4360,9 +4362,19 @@ with tab_settings:
 
     if st.button("💾 Instellingen opslaan"):
         new_config = copy.deepcopy(config)
-        new_config["races"] = [
-            {
-                "name": str(r["name"]).strip(),
+        nieuwe_races = []
+        overgeslagen_races = []
+        for _, r in edited_races.iterrows():
+            naam = str(r["name"] or "").strip()
+            heeft_datum = pd.notna(r["date"])
+            if not naam and not heeft_datum:
+                continue  # een volledig lege rij (bijv. per ongeluk aangemaakt)
+            if not naam or not heeft_datum:
+                reden = "geen datum" if naam else "geen naam"
+                overgeslagen_races.append(f"{naam or '(naamloos)'} — {reden}")
+                continue
+            nieuwe_races.append({
+                "name": naam,
                 "date": pd.to_datetime(r["date"]).date(),
                 "swim_m": int(r["swim_m"]) if pd.notna(r["swim_m"]) and r["swim_m"] else None,
                 "bike_m": int(r["bike_m"]) if pd.notna(r["bike_m"]) and r["bike_m"] else None,
@@ -4370,10 +4382,13 @@ with tab_settings:
                 "distances": str(r["distances"] or ""),
                 "goal": str(r["goal"] or ""),
                 "target_time": str(r.get("target_time") or ""),
-            }
-            for _, r in edited_races.iterrows()
-            if str(r["name"]).strip() and pd.notna(r["date"])
-        ]
+            })
+        new_config["races"] = nieuwe_races
+        if overgeslagen_races:
+            st.session_state["settings_flash_warning"] = (
+                "⚠️ Niet opgeslagen (naam én datum zijn allebei verplicht): "
+                + "; ".join(overgeslagen_races)
+            )
         new_config["athlete"]["max_hr"] = new_max_hr
         # Drempels per sport in één keer wegschrijven (wist meteen de oude
         # platte lthr/ftp-velden, zodat er één bron van waarheid is).
