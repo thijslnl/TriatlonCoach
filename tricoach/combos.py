@@ -494,6 +494,49 @@ def race_similarity(dist_by_sport: dict[str, float],
     return f"{prefix} {naam}: " + ", ".join(delen)
 
 
+# Hoeveel dagen een combo-datum van een race-datum uit config.yaml mag
+# afwijken om nog als "dit is de race zelf" te gelden (niet alleen een
+# trainingssimulatie) — 1 dag vangt tijdzone-afronding bij een race die net
+# vóór/na middernacht start op.
+RACE_DATE_TOLERANCE_DAYS = 1
+
+
+def matched_race(start_time, dist_by_sport: dict[str, float],
+                 config: dict | None) -> dict | None:
+    """Is deze combinatietraining vermoedelijk de race zelf?
+
+    Net als :func:`race_similarity`, maar dan met de datum als extra
+    voorwaarde: alleen een race uit config.yaml waarvan de datum binnen
+    :data:`RACE_DATE_TOLERANCE_DAYS` van ``start_time`` ligt komt in
+    aanmerking, en de afstanden moeten binnen dezelfde marge passen
+    (:data:`SIM_RATIO_MIN`/:data:`SIM_RATIO_MAX`). Geeft de race-dict uit
+    config.yaml terug (met ``name``/``date``/...), of ``None``.
+    """
+    aanwezig = {s: d for s, d in dist_by_sport.items()
+               if d and not pd.isna(d) and d > 0}
+    if len(aanwezig) < 2:
+        return None
+    combo_datum = local_time(start_time).date()
+
+    for race in (config or {}).get("races", []):
+        race_datum = race.get("date")
+        if not race_datum:
+            continue
+        if abs((combo_datum - race_datum).days) > RACE_DATE_TOLERANCE_DAYS:
+            continue
+        opzet = {}
+        for veld, sport in (("swim_m", "swimming"), ("bike_m", "cycling"),
+                            ("run_m", "running")):
+            if race.get(veld):
+                opzet[sport] = float(race[veld])
+        if not opzet or not all(sport in opzet for sport in aanwezig):
+            continue
+        ratios = {s: aanwezig[s] / opzet[s] for s in aanwezig}
+        if all(SIM_RATIO_MIN <= r <= SIM_RATIO_MAX for r in ratios.values()):
+            return race
+    return None
+
+
 # ------------------------------------------------ trend & feedback-context --
 
 def combo_history(conn: sqlite3.Connection, acts: pd.DataFrame,

@@ -49,6 +49,7 @@ from tricoach.combos import (
     combo_membership,
     detect_and_store_proposals,
     load_combos,
+    matched_race,
     max_gap_min,
     race_similarity,
     run_transition_analysis,
@@ -2574,9 +2575,21 @@ with tab_bricks:
     SPORT_ICOON = {"swimming": "🏊", "cycling": "🚴", "running": "🏃"}
 
     def combo_titel(combo) -> str:
-        """Kopregel van een combo-blok: soort, datum en de onderdelen."""
-        soort = ("🏊🚴🏃 Triatlon-training" if combo["kind"] == "triatlon"
-                 else "🧱 Brick")
+        """Kopregel van een combo-blok: soort, datum en de onderdelen.
+
+        Valt de datum en de afstanden samen met een race uit config.yaml
+        (zie :func:`matched_race`), dan toont de kop de racenaam zelf in
+        plaats van het generieke "Triatlon-training"/"Brick" — dit was
+        vermoedelijk geen trainingssimulatie maar de race zelf.
+        """
+        afstanden = {m["sport"]: m.get("distance_m") for m in combo["members"]}
+        race = matched_race(combo["start_time"], afstanden, config)
+        if race:
+            soort = f"🏁 {race.get('name', 'Race')}"
+        elif combo["kind"] == "triatlon":
+            soort = "🏊🚴🏃 Triatlon-training"
+        else:
+            soort = "🧱 Brick"
         delen = " → ".join(
             f"{SPORT_ICOON[m['sport']]} {(m['distance_m'] or 0) / 1000:.1f} km"
             for m in combo["members"])
@@ -2613,9 +2626,16 @@ with tab_bricks:
             f"{fmt_duration(combo['wissel_s'])} wisseltijd)")
 
         afstanden = {m["sport"]: m.get("distance_m") for m in members}
-        sim = race_similarity(afstanden, config)
-        if sim:
-            st.info(f"🏁 {sim}")
+        race = matched_race(combo["start_time"], afstanden, config)
+        if race:
+            st.success(
+                f"🏁 Dit is vermoedelijk je race: **{race.get('name', 'race')}** "
+                f"({combo['start_time']:%d-%m-%Y}) — datum en afstanden komen overeen."
+            )
+        else:
+            sim = race_similarity(afstanden, config)
+            if sim:
+                st.info(f"🏁 {sim}")
 
         # De kern van brick-training: de loop na het fietsen. Eerste stuk vs
         # de rest, plus het tempoverloop van de eerste kilometers.
@@ -4183,6 +4203,46 @@ with tab_settings:
         "standaardafstand (1,5 / 40 / 10 km)."
     )
 
+    def _races_from_editor(edited: pd.DataFrame) -> tuple[list[dict], list[str]]:
+        """Zet de bewerkte tabel om naar races; rijen zonder naam én datum
+        worden overgeslagen (beide zijn verplicht — de racevoorspelling
+        rekent op de datum). Geeft ``(races, overgeslagen_meldingen)`` terug."""
+        races, overgeslagen = [], []
+        for _, r in edited.iterrows():
+            naam = str(r["name"] or "").strip()
+            heeft_datum = pd.notna(r["date"])
+            if not naam and not heeft_datum:
+                continue  # een volledig lege rij (bijv. per ongeluk aangemaakt)
+            if not naam or not heeft_datum:
+                reden = "geen datum" if naam else "geen naam"
+                overgeslagen.append(f"{naam or '(naamloos)'} — {reden}")
+                continue
+            races.append({
+                "name": naam,
+                "date": pd.to_datetime(r["date"]).date(),
+                "swim_m": int(r["swim_m"]) if pd.notna(r["swim_m"]) and r["swim_m"] else None,
+                "bike_m": int(r["bike_m"]) if pd.notna(r["bike_m"]) and r["bike_m"] else None,
+                "run_m": int(r["run_m"]) if pd.notna(r["run_m"]) and r["run_m"] else None,
+                "distances": str(r["distances"] or ""),
+                "goal": str(r["goal"] or ""),
+                "target_time": str(r.get("target_time") or ""),
+            })
+        return races, overgeslagen
+
+    if st.button("💾 Races opslaan", key="races_opslaan_knop"):
+        nieuwe_races, overgeslagen_races = _races_from_editor(edited_races)
+        races_config = copy.deepcopy(config)
+        races_config["races"] = nieuwe_races
+        save_config(races_config)
+        if overgeslagen_races:
+            st.session_state["settings_flash_warning"] = (
+                "⚠️ Niet opgeslagen (naam én datum zijn allebei verplicht): "
+                + "; ".join(overgeslagen_races)
+            )
+        else:
+            st.session_state["settings_flash"] = f"{len(nieuwe_races)} race(s) opgeslagen."
+        st.rerun()
+
     st.subheader("🗓️ Trainingsdagen & beschikbare tijd")
     c1, c2 = st.columns(2)
     new_training_days = c1.text_input(
@@ -4362,27 +4422,7 @@ with tab_settings:
 
     if st.button("💾 Instellingen opslaan"):
         new_config = copy.deepcopy(config)
-        nieuwe_races = []
-        overgeslagen_races = []
-        for _, r in edited_races.iterrows():
-            naam = str(r["name"] or "").strip()
-            heeft_datum = pd.notna(r["date"])
-            if not naam and not heeft_datum:
-                continue  # een volledig lege rij (bijv. per ongeluk aangemaakt)
-            if not naam or not heeft_datum:
-                reden = "geen datum" if naam else "geen naam"
-                overgeslagen_races.append(f"{naam or '(naamloos)'} — {reden}")
-                continue
-            nieuwe_races.append({
-                "name": naam,
-                "date": pd.to_datetime(r["date"]).date(),
-                "swim_m": int(r["swim_m"]) if pd.notna(r["swim_m"]) and r["swim_m"] else None,
-                "bike_m": int(r["bike_m"]) if pd.notna(r["bike_m"]) and r["bike_m"] else None,
-                "run_m": int(r["run_m"]) if pd.notna(r["run_m"]) and r["run_m"] else None,
-                "distances": str(r["distances"] or ""),
-                "goal": str(r["goal"] or ""),
-                "target_time": str(r.get("target_time") or ""),
-            })
+        nieuwe_races, overgeslagen_races = _races_from_editor(edited_races)
         new_config["races"] = nieuwe_races
         if overgeslagen_races:
             st.session_state["settings_flash_warning"] = (
